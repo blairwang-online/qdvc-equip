@@ -8,19 +8,21 @@ derived from the filesystem rather than stored in the YAML.
 The YAML body holds the descriptive fields the Preview pane renders:
 
     name: Coffee Machine
-    emoji: "\u2615"
-    location_notes: |
-      You might need to move aside the cartons of UHT milk which
-      may be blocking your view of the coffee machine.
-    info:
-      Asset tag: SDR892314T
-      Manufacturer: Coffee Machines Inc.
-      Model: Cino Grande XL Gen. 2
-      Serial number: 689D857D6
+    emoji: ☕
+    location_notes: "You might need to move aside the cartons of UHT milk which
+      may be blocking your view of the coffee machine."
+    asset_information:
+      asset_tag: SDR892314T
+      manufacturer: Coffee Machines Inc.
+      model: Cino Grande XL Gen. 2
+      serial_number: 689D857D6
 
-``info`` is an ordered mapping of arbitrary label → value pairs; each becomes a
-row with a [copy] button in the Preview pane. Everything is optional — a brand
-new asset is simply ``name`` derived from its filename.
+``asset_information`` is an ordered mapping. Its keys are stored on disk in
+snake_case (``asset_tag``, ``serial_number``) to match the project's naming
+convention, but are *humanized* for display in the Preview pane ("Asset Tag",
+"Serial Number"). Each becomes a value-aligned row with a [copy] button.
+Everything except ``name`` is optional — a brand new asset is simply ``name``
+derived from its filename.
 
 This module degrades gracefully without PyYAML: it can still read and write a
 small, predictable subset of YAML so the application runs on a bare install.
@@ -39,6 +41,9 @@ except Exception:  # pragma: no cover - exercised only on bare installs.
 
 from . import naming
 
+# The YAML key holding the asset-information mapping.
+INFO_KEY = "asset_information"
+
 
 class Asset(object):
     """In-memory representation of one ``.yml`` asset file.
@@ -49,7 +54,9 @@ class Asset(object):
         name:           display name (defaults to humanized filename stem).
         emoji:          a short glyph shown before the name in Preview.
         location_notes: free text describing where/how to find it.
-        info:           OrderedDict of label -> value asset-information rows.
+        info:           OrderedDict of snake_case_key -> value rows (the
+                        ``asset_information`` mapping). Keys are humanized only
+                        at render time, never on disk.
     """
 
     def __init__(self, path=None, workspace_root=None):
@@ -93,17 +100,25 @@ class Asset(object):
     def asset_tag(self):
         """Return the asset's tag for card-view display, or ''.
 
-        Looks for an ``info`` row whose label is (case-insensitively) "asset
-        tag" or just "tag"; falls back to the first info value if neither is
+        Looks for an ``asset_information`` row whose (snake_case) key is
+        ``asset_tag`` or ``tag``; falls back to the first value if neither is
         present. Used as the second line of a card in the items pane.
         """
         if not self.info:
             return ""
         for key, value in self.info.items():
-            if key.strip().lower() in ("asset tag", "tag"):
+            if key.strip().lower() in ("asset_tag", "tag"):
                 return value
-        # Fall back to the first info value.
         return next(iter(self.info.values()), "")
+
+    def info_display_items(self):
+        """Yield (humanized_label, value) pairs for the Preview pane.
+
+        Keys are stored snake_case on disk and humanized here for display, e.g.
+        ``asset_tag`` -> "Asset Tag", ``serial_number`` -> "Serial Number".
+        """
+        for key, value in self.info.items():
+            yield (naming.humanize(key), value)
 
     def notes_snippet(self, max_len=80):
         """A one-line snippet of location_notes for card-view's third line."""
@@ -124,7 +139,7 @@ class Asset(object):
         if self.location_notes:
             d["location_notes"] = self.location_notes
         if self.info:
-            d["info"] = OrderedDict(self.info)
+            d[INFO_KEY] = OrderedDict(self.info)
         return d
 
     def to_yaml(self):
@@ -148,7 +163,11 @@ class Asset(object):
         asset.name = str(data.get("name") or "").strip()
         asset.emoji = str(data.get("emoji") or "").strip()
         asset.location_notes = str(data.get("location_notes") or "").rstrip()
-        info = data.get("info") or {}
+        # Prefer the canonical `asset_information` key; tolerate the older
+        # `info` key for backward compatibility with early files.
+        info = data.get(INFO_KEY)
+        if info is None:
+            info = data.get("info") or {}
         if isinstance(info, dict):
             asset.info = OrderedDict(
                 (str(k), "" if v is None else str(v)) for k, v in info.items()
@@ -225,12 +244,13 @@ def _fallback_dump(data):
     """Very small YAML emitter for the subset this app writes.
 
     Handles top-level scalar keys, a multiline ``location_notes`` block, and a
-    one-level-nested ``info`` mapping. Used only when PyYAML is unavailable.
+    one-level-nested ``asset_information`` mapping. Used only when PyYAML is
+    unavailable.
     """
     lines = []
     for key, value in data.items():
-        if key == "info" and isinstance(value, dict):
-            lines.append("info:")
+        if key == INFO_KEY and isinstance(value, dict):
+            lines.append("%s:" % INFO_KEY)
             for k, v in value.items():
                 lines.append("  %s: %s" % (k, _scalar(v)))
         elif key == "location_notes" and isinstance(value, str) and "\n" in value:
@@ -273,7 +293,7 @@ def _fallback_load(text):
         key, _, val = line.partition(":")
         key = key.strip()
         val = val.strip()
-        if key == "info":
+        if key in (INFO_KEY, "info"):
             in_info = True
             i += 1
             continue
@@ -288,7 +308,7 @@ def _fallback_load(text):
         data[key] = _unscalar(val)
         i += 1
     if info:
-        data["info"] = info
+        data[INFO_KEY] = info
     return data
 
 

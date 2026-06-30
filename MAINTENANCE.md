@@ -27,42 +27,61 @@ qdvcequip_lib/
   naming.py        (core)  snake_case slugify / humanize / validate /
                            unique_name. The single source of truth for the
                            naming convention.
-  asset.py         (core)  Asset model + YAML (de)serialisation. Includes a
-                           tiny no-PyYAML fallback dumper/loader so the app
-                           runs on a bare install. asset_tag() / notes_snippet()
-                           supply the card-view sub-lines.
+  asset.py         (core)  Asset model + YAML (de)serialisation. The
+                           asset-information mapping is the `asset_information`
+                           YAML key with snake_case sub-keys; info_display_items()
+                           humanizes them for the Preview pane. asset_tag() /
+                           notes_snippet() supply the card-view sub-lines.
+                           Includes a no-PyYAML fallback dumper/loader.
   workspace.py     (core)  Workspace + FolderNode tree. Scans the filesystem,
                            enforces workspace-wide name uniqueness, computes
                            new asset/folder paths.
-  settings.py      (core)  Persisted settings + recent/open workspace list,
-                           stored as YAML under $XDG_CONFIG_HOME/qdvc-equip/.
+  settings.py      (core)  Persisted settings + recent/open workspace list.
                            Also defines the Preferences-backed keys (code_font,
                            editor_line_spacing, toolbar_style) with bounds.
-  gtk3_menubar.py  (view)  MenuBarMixin: builds the File/Edit/View/Help menus
-                           (icons on items via Gtk.ImageMenuItem). Mixed into
-                           EquipWindow.
-  gtk3_toolbar.py  (view)  ToolbarMixin: builds the toolbar and maps the
-                           toolbar_style setting to a Gtk.ToolbarStyle. Mixed
-                           into EquipWindow. Card view = mail-attachment icon,
-                           Preview = document-page-setup icon (same as the
-                           notebook).
-  gtk3_preferences.py (view) PreferencesDialog: the Edit -> Preferences dialog
-                           (Fonts + Interface tabs) with live preview and
-                           Save/Cancel-revert.
-  gtk3_preview.py  (view)  Builds the read-only "card" shown when Preview is on,
-                           including the per-row [copy] buttons.
-  gtk3_window.py   (view)  EquipWindow itself: layout, the three panes, the
-                           details notebook, the status bar, and all action
-                           handlers. Composes the menubar/toolbar mixins.
+  gtk3_menubar.py  (view)  MenuBarMixin: File/Edit/View/Help menus (icons on
+                           items). New tab sits just before Close tab. Exposes
+                           _icon_menu_item, reused by the context menus.
+  gtk3_toolbar.py  (view)  ToolbarMixin: the toolbar + toolbar_style mapping.
+                           Card view = mail-attachment, Preview =
+                           document-page-setup (same icons as the notebook).
+  gtk3_contextmenu.py (view) ContextMenuMixin: the pane-2 and tab right-click
+                           menus (Locate / Open in new tab / Move to subfolder /
+                           Copy full path / Show in file browser) and their
+                           helpers, plus _confirm / _error_dialog.
+  gtk3_editortab.py (view) AssetTab: one tab's editor view, styled tab label
+                           (padding, padlock + preview status icons, title
+                           EventBox for right-click, close button), and its
+                           per-tab read_only / preview / dirty state.
+  gtk3_preferences.py (view) PreferencesDialog: Edit -> Preferences (Fonts +
+                           Interface) with live preview and Save/Cancel-revert.
+  gtk3_preview.py  (view)  Builds the read-only Preview card: humanized,
+                           value-aligned asset-information rows (Gtk.Grid +
+                           SizeGroup) with per-row [copy] buttons.
+  gtk3_window.py   (view)  EquipWindow: layout, the three panes, the details
+                           notebook, the status bar, and action handlers.
+                           Composes the four mixins above.
 ```
 
 ## Mixin composition
 
-`EquipWindow(MenuBarMixin, ToolbarMixin, Gtk.Window)`. The mixins hold only
-`_build_menubar` / `_build_toolbar` (plus toolbar-style helpers) and rely on
-handlers and attributes defined on the window. This keeps `gtk3_window.py`
-focused and mirrors qdvc-markdown-notebook's structure. If you add another
-large UI region, give it its own `*Mixin` rather than growing the window file.
+`EquipWindow(MenuBarMixin, ToolbarMixin, ContextMenuMixin, Gtk.Window)`. The
+mixins hold construction/handler groups and rely on attributes defined on the
+window; each AssetTab is its own object (not a mixin) created via `new_tab`.
+This keeps `gtk3_window.py` focused and mirrors qdvc-markdown-notebook's split.
+
+## Per-tab read-only & preview
+
+Read-only and Preview are stored on each `AssetTab` (`tab.read_only`,
+`tab.preview`), not globally. The toolbar/menu toggles act on the **active**
+tab: `_set_read_only` / `_set_preview` read `_current_tab()`, update that tab,
+and re-render it. `self.read_only` / `self.preview_mode` on the window are just
+mirrors of the active tab, read by the status bar and gating. On tab switch,
+`_sync_toggles_to_tab` pushes the landed-on tab's state back onto the toggles
+(guarded by `_syncing_view_toggles`) and re-locks Read-only while previewing.
+Each tab's label shows a padlock icon while read-only and a preview icon while
+previewing, driven by `AssetTab.refresh_status_icons()` (the icons use
+`set_no_show_all` so a blanket `show_all()` can't reveal them).
 
 ## Key concepts
 
@@ -105,6 +124,35 @@ a third surface for these toggles, funnel it through the same `_set_*` method.
 **Preview disables Read-only.** `_set_preview` calls
 `btn_readonly.set_sensitive(not preview)` and the same on the menu item, because
 preview is read-only by construction — matching qdvc-markdown-notebook.
+
+## Navigation tree (pane 1)
+
+Built as a `Gtk.TreeStore` with columns `[label, kind, path, ws_root]`. Row
+kinds: `KIND_ALL` (the "All Assets" virtual row, always first, re-added by
+`refresh_workspaces`), `KIND_WORKSPACE` (one per open workspace), and
+`KIND_FOLDER` (nested arbitrarily deep). Selecting All Assets calls
+`_fill_item_list_all` (every asset in every workspace); selecting a workspace
+or folder calls `_fill_item_list`. There is no mapping between folder depth and
+real-world ontology — the tree just mirrors the filesystem.
+
+## Context menus
+
+`gtk3_contextmenu.ContextMenuMixin` builds the shared menu. The pane-2
+right-click (`on_items_button_press`, wired to the item view's
+`button-press-event`) omits "Locate in subfolders"; the tab right-click
+(`on_tab_context_menu`, passed to each `AssetTab` as its `on_context_menu`
+callback and fired from the title EventBox) includes it. "Move to subfolder"
+lists `(workspace root)` plus a humanized breadcrumb for every folder via
+`_all_folder_destinations`, greys out the current folder, confirms, then
+`os.rename`s the file and updates any open tab pointing at it.
+
+## Preview alignment
+
+`gtk3_preview.build_preview` lays asset-information rows in a 3-column
+`Gtk.Grid` (label, value, copy button). A horizontal `Gtk.SizeGroup` over the
+label cells forces them all to the width of the widest label, so the value
+column aligns — the GNOME/MATE convention. Labels come humanized from
+`Asset.info_display_items()`; the snake_case keys never appear in the UI.
 
 ## Card view (items pane)
 

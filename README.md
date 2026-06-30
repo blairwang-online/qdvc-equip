@@ -24,15 +24,17 @@ set of materials — an **asset** — is a single `.yml` file.
 
 ## What you get
 
-- **Pane 1 — Navigation tree.** One expandable root per open workspace, each
+- **Pane 1 — Navigation tree.** An **All Assets** row at the top (every asset
+  in every open workspace), then one expandable root per open workspace, each
   showing its full nested folder hierarchy so you can see exactly where an asset
   lives. Several workspaces can be open at once.
-- **Pane 2 — Items.** The assets stored directly in the selected folder, with a
-  filter box.
+- **Pane 2 — Items.** The assets stored directly in the selected folder (or all
+  of them, under All Assets), with a filter box. Right-click a row for a context
+  menu.
 - **Pane 3 — Item details.** A tabbed editor. By default it shows the asset's
   raw YAML; flip the **Preview** toggle and it becomes a rendered equipment card
-  with a location breadcrumb, location notes, and copyable asset-information
-  rows.
+  with a location breadcrumb and copyable asset-information rows. **Read-only**
+  and **Preview** are tracked per tab.
 
 Plus a menu bar (**File / Edit / View / Help**, with `Alt+F` … `Alt+H`, icons
 on items), a toolbar (**New tab · New asset · Save asset · Card view ·
@@ -55,35 +57,38 @@ The Preview button is the headline feature. For `coffee_machine.yml` it renders:
 ```
 ☕ Coffee Machine
 Location
-| Home → Kitchen → Pantry
-Location Notes
-| You might need to move aside the cartons of UHT milk…
+    Home → Kitchen → Pantry
 Asset Information
-| Asset tag: SDR892314T              [copy]
-| Manufacturer: Coffee Machines Inc. [copy]
-| Model: Cino Grande XL Gen. 2       [copy]
-| Serial number: 689D857D6           [copy]
+    Asset Tag:      SDR892314T              [copy]
+    Manufacturer:   Coffee Machines Inc.    [copy]
+    Model:          Cino Grande XL Gen. 2   [copy]
+    Serial Number:  689D857D6               [copy]
 ```
 
-Each **[copy]** button puts that value on the clipboard.
+Asset-information labels are humanized from their snake_case keys, their values
+are aligned in a column, and each **[copy]** button puts that value on the
+clipboard. Read-only and Preview are tracked **per tab**: a tab shows a padlock
+icon while read-only and a preview icon while previewing.
 
 ## Asset file format
 
 ```yaml
 name: Coffee Machine
-emoji: "☕"
-location_notes: |
-  You might need to move aside the cartons of UHT milk
-  which may be blocking your view of the coffee machine.
-info:
-  Asset tag: SDR892314T
-  Manufacturer: Coffee Machines Inc.
-  Model: Cino Grande XL Gen. 2
-  Serial number: 689D857D6
+emoji: ☕
+location_notes: "You might need to move aside the cartons of UHT milk which may be
+  blocking your view of the coffee machine."
+asset_information:
+  asset_tag: SDR892314T
+  manufacturer: Coffee Machines Inc.
+  model: Cino Grande XL Gen. 2
+  serial_number: 689D857D6
 ```
 
 Everything except `name` is optional. The asset's **location is not stored** in
-the file — it is derived from the folders the file is nested in.
+the file — it is derived from the folders the file is nested in. Keys under
+`asset_information` are written in `snake_case` (matching the project naming
+convention) and **humanized for display** in the Preview pane, where their
+values are column-aligned and each gets a `[copy]` button.
 
 ## Naming convention
 
@@ -91,6 +96,19 @@ Folder names and asset filenames are kept in lowercase `snake_case` (no spaces
 or special characters). The app slugifies anything you type, and enforces that
 **no two folders or assets share a name within a workspace** — hence
 `sony_headphones_1`, `sony_headphones_2`, and so on.
+
+## Right-click menu
+
+Right-click an asset in the items pane, or a tab, for a context menu:
+
+- **Locate in subfolders** (tabs only) — selects the asset's containing folder
+  in the navigation tree.
+- **Open in new tab** — opens the asset in a fresh tab.
+- **Move to subfolder** — a submenu of every folder in the asset's workspace
+  (plus the workspace root); the folder it already lives in is greyed out, and
+  the move is confirmed before the `.yml` file is relocated on disk.
+- **Copy full path** — copies the asset's absolute path to the clipboard.
+- **Show in file browser** — opens the containing folder in your file manager.
 
 ## Usage
 
@@ -101,6 +119,54 @@ python3 qdvc_equip.py                                          # reopen last ses
 
 With no arguments it reopens whatever workspaces were open last time; use
 **File → Open workspace** (`Ctrl+O`) to add more.
+
+## Desktop integration (application menu entry)
+
+To make "QDVC Equip" appear in your MATE/GNOME application menu, install a
+`.desktop` file.
+
+First decide where the script lives. Assuming you keep the project at
+`~/Applications/qdvc-equip/` (adjust the `Exec` path below to match), create
+`~/.local/share/applications/qdvc-equip.desktop` with:
+
+```ini
+[Desktop Entry]
+Type=Application
+Name=QDVC Equip
+Comment=Track your tools, equipment, and materials across workspaces
+Exec=python3 /home/YOUR_USERNAME/Applications/qdvc-equip/qdvc_equip.py %F
+Icon=package-x-generic
+Terminal=false
+Categories=Office;Utility;
+MimeType=inode/directory;
+StartupNotify=true
+StartupWMClass=qdvc-equip
+```
+
+Notes:
+
+- Replace the `Exec` path with the absolute path to `qdvc_equip.py`. The script
+  must be able to find its `qdvcequip_lib/` package alongside it, which it will
+  as long as you point `Exec` at the script in its own directory.
+- `%F` lets the launcher pass workspace folders you drop onto the icon as
+  arguments; launching with no argument reopens your last session.
+- `Icon=package-x-generic` is a standard freedesktop icon present on a typical
+  GNOME/MATE install. To use your own, point `Icon=` at an absolute path to a
+  `.png` or `.svg`.
+- `StartupWMClass=qdvc-equip` lets the panel/taskbar match the running window to
+  this entry, so it shows the app icon instead of a generic window icon. The app
+  sets its program name to `qdvc-equip` to match, and sets its window icon to
+  `package-x-generic` directly so the icon appears even before any `.desktop`
+  matching.
+
+Then refresh the menu database (often automatic):
+
+```bash
+update-desktop-database ~/.local/share/applications
+```
+
+For a system-wide entry available to all users, place the file in
+`/usr/share/applications/` instead (requires root).
 
 ## Requirements
 

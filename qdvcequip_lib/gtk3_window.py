@@ -1,25 +1,26 @@
 """gtk3_window.py — the main application window (GTK3 view/controller).
 
 Assembles the GNOME2-era layout and wires user actions to the GTK-free core.
-The heavy menu-bar and toolbar construction live in sibling mixins
-(gtk3_menubar.MenuBarMixin, gtk3_toolbar.ToolbarMixin) which are combined into
-EquipWindow here, keeping this file focused on layout, the three panes, the
-notebook of asset tabs, and the action handlers.
+Heavy construction lives in sibling mixins (gtk3_menubar.MenuBarMixin,
+gtk3_toolbar.ToolbarMixin, gtk3_contextmenu.ContextMenuMixin); each AssetTab
+(gtk3_editortab) owns its editor view, label, and per-tab state. This file
+focuses on layout, the three panes, the notebook of tabs, and action handlers.
 
 Layout: menubar, toolbar, three horizontal panes (navigation tree, items,
 item details) in nested Gtk.Paned, and a status bar with a bold mode label
-followed by a Gtk.Statusbar (matching qdvc-markdown-notebook's footer).
+followed by a Gtk.Statusbar.
 
-Multi-workspace: the navigation tree (pane 1) holds one expandable root per
-open workspace, each rendering the full nested folder hierarchy. Selecting a
-folder fills the items pane (pane 2); selecting an asset opens it in the active
-tab of the details notebook (pane 3). Each tab shows either the plaintext YAML
-editor or, when Preview is on, the rendered card from gtk3_preview.
+Multi-workspace navigation tree (pane 1): an "All Assets" row at the very top
+(every asset in every open workspace), then one expandable root per workspace
+rendering its full nested folder hierarchy. Selecting All Assets, a workspace,
+or a folder fills the items pane (pane 2). Selecting an asset opens it in the
+active tab (pane 3); double-click / Enter opens it in a new tab; right-click
+raises the context menu.
 
-Read-only / Preview / Card view are app-wide toggles mirrored between the
-toolbar and the View menu via _sync_toggle (guarded against feedback loops).
-Activating Preview disables the Read-only toggle, since preview is read-only by
-construction — exactly as in the notebook.
+Per-tab modes: Read-only and Preview are tracked per tab (like
+qdvc-markdown-notebook). The toolbar/menu toggles act on the active tab, and
+switching tabs reflects that tab's state back onto the toggles. Activating
+Preview disables the Read-only toggle (preview is read-only by construction).
 """
 
 import os
@@ -38,10 +39,13 @@ from . import naming
 from .gtk3_preview import build_preview
 from .gtk3_menubar import MenuBarMixin
 from .gtk3_toolbar import ToolbarMixin
+from .gtk3_contextmenu import ContextMenuMixin
 from .gtk3_preferences import PreferencesDialog
+from .gtk3_editortab import AssetTab
 
 # Navigation tree column indices.
 NAV_LABEL, NAV_KIND, NAV_PATH, NAV_WS_ROOT = range(4)
+KIND_ALL = "all_assets"
 KIND_WORKSPACE = "workspace"
 KIND_FOLDER = "folder"
 
@@ -55,20 +59,18 @@ def _xml_escape(text):
             .replace("<", "&lt;").replace(">", "&gt;"))
 
 
-class AssetTab(object):
-    """State for one tab in the details notebook (pane 3)."""
-
-    def __init__(self):
-        self.asset = None            # Asset or None
-        self.workspace_disp = ""     # workspace display name for breadcrumb
-        self.container = None        # Gtk.Box swapped between editor/preview
-        self.textview = None         # Gtk.TextView (plaintext editor)
-        self.scroller = None         # ScrolledWindow holding the textview
-        self.label = None            # Gtk.Label in the tab header
-        self.dirty = False
+def _parse_font(font_desc):
+    """Split a Pango font string like 'monospace 11' into (family, size_pt)."""
+    parts = str(font_desc).split()
+    size = 11
+    if parts and parts[-1].isdigit():
+        size = int(parts[-1])
+        parts = parts[:-1]
+    family = " ".join(parts) or "monospace"
+    return family, size
 
 
-class EquipWindow(MenuBarMixin, ToolbarMixin, Gtk.Window):
+class EquipWindow(MenuBarMixin, ToolbarMixin, ContextMenuMixin, Gtk.Window):
     """Top-level QDVC Equip window."""
 
     def __init__(self, workspace_paths=None):
@@ -77,6 +79,8 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, Gtk.Window):
 
         self.settings = Settings.load()
         self.workspaces = []            # list[Workspace]
+        # Window-level mirrors of the ACTIVE tab's per-tab state, read by the
+        # status bar and the gating logic.
         self.read_only = bool(self.settings["read_only"])
         self.preview_mode = False
         self.card_view = False
@@ -123,8 +127,6 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, Gtk.Window):
 
     # ----- status bar -------------------------------------------------------
     def _build_statusbar(self):
-        # Footer: a bold mode indicator on the left, then a Gtk.Statusbar
-        # filling the rest (same layout/style as qdvc-markdown-notebook).
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         self.statusbar_box = box
         self.mode_label = Gtk.Label()
@@ -155,13 +157,21 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, Gtk.Window):
         self.nav_view.get_selection().connect("changed", self.on_nav_selected)
         sw.add(self.nav_view)
         frame.add(sw)
+        self._add_all_assets_row()
         return frame
+
+    def _add_all_assets_row(self):
+        # The "All Assets" virtual node sits at the very top (mirrors the
+        # notebook's "All Notes").
+        self.nav_store.append(
+            None, ["All Assets", KIND_ALL, "", ""])
 
     def _nav_icon_func(self, _col, cell, model, it, _data):
         kind = model[it][NAV_KIND]
-        cell.set_property(
-            "icon-name",
-            "drive-harddisk" if kind == KIND_WORKSPACE else "folder")
+        cell.set_property("icon-name", {
+            KIND_ALL: "emblem-documents",
+            KIND_WORKSPACE: "drive-harddisk",
+        }.get(kind, "folder"))
 
     # ----- pane 2: item list -----------------------------------------------
     def _build_item_pane(self):
@@ -194,6 +204,8 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, Gtk.Window):
 
         self.item_view.get_selection().connect("changed", self.on_item_selected)
         self.item_view.connect("row-activated", self.on_item_activated)
+        # Right-click context menu (handled in ContextMenuMixin).
+        self.item_view.connect("button-press-event", self.on_items_button_press)
         sw.add(self.item_view)
         box.pack_start(sw, True, True, 0)
         frame.add(box)
@@ -211,14 +223,6 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, Gtk.Window):
         return term in hay
 
     def _item_cell_data(self, _col, cell, store, it, _data):
-        """Render an items-pane row as a plain title (list) or a 3-line card.
-
-        GTK calls this for each visible row just before painting. In list view
-        the row is just the asset name. In card view it is three lines: the
-        bold name, the asset tag, then a location-notes snippet. Sub-lines are
-        italic and slightly smaller so they sit beneath the title without
-        clashing with the selection highlight.
-        """
         title = _xml_escape(store[it][ITEM_LABEL])
         if not self.card_view:
             cell.set_property("ypad", 0)
@@ -283,6 +287,7 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, Gtk.Window):
 
     def refresh_workspaces(self):
         self.nav_store.clear()
+        self._add_all_assets_row()
         for ws in self.workspaces:
             ws.refresh()
             self._add_workspace_to_nav(ws)
@@ -291,33 +296,17 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, Gtk.Window):
     # Tabs (pane 3)
     # ====================================================================
     def new_tab(self, asset=None, workspace_disp=""):
-        tab = AssetTab()
+        tab = AssetTab(
+            on_close=self._close_specific_tab,
+            on_context_menu=self.on_tab_context_menu,
+            on_buffer_changed=self._on_buffer_changed,
+            read_only=self.read_only,
+        )
         tab.asset = asset
         tab.workspace_disp = workspace_disp
-
-        tab.container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-
-        tab.scroller = Gtk.ScrolledWindow()
-        tab.scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        tab.textview = Gtk.TextView()
-        tab.textview.set_monospace(True)
-        tab.textview.set_left_margin(8)
-        tab.textview.set_right_margin(8)
-        tab.textview.get_buffer().connect("changed", self._on_buffer_changed, tab)
-        tab.scroller.add(tab.textview)
-        tab.container.pack_start(tab.scroller, True, True, 0)
         self._apply_editor_style(tab)
 
-        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        tab.label = Gtk.Label(label=self._tab_title(tab))
-        header.pack_start(tab.label, True, True, 0)
-        close = Gtk.Button.new_from_icon_name("window-close", Gtk.IconSize.MENU)
-        close.set_relief(Gtk.ReliefStyle.NONE)
-        close.connect("clicked", lambda *_: self._close_specific_tab(tab))
-        header.pack_start(close, False, False, 0)
-        header.show_all()
-
-        idx = self.notebook.append_page(tab.container, header)
+        idx = self.notebook.append_page(tab.container, tab.tab_label)
         self.notebook.set_tab_reorderable(tab.container, True)
         self.tabs.append(tab)
         tab.container.show_all()
@@ -325,17 +314,6 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, Gtk.Window):
         self._load_tab_content(tab)
         self._update_tabbar_visibility()
         return tab
-
-    def _tab_title(self, tab):
-        if tab.asset and tab.asset.name:
-            t = tab.asset.name
-        elif tab.asset and tab.asset.stem:
-            t = naming.humanize(tab.asset.stem)
-        else:
-            t = "(empty)"
-        if len(t) > 14:
-            t = t[:12] + "\u2026"
-        return ("*" + t) if tab.dirty else t
 
     def _current_tab(self):
         idx = self.notebook.get_current_page()
@@ -349,28 +327,21 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, Gtk.Window):
 
     def _load_tab_content(self, tab):
         buf = tab.textview.get_buffer()
-        if tab.asset is None:
-            self._suppress_dirty = True
-            buf.set_text("")
-            self._suppress_dirty = False
-            tab.textview.set_editable(False)
-        else:
-            self._suppress_dirty = True
-            buf.set_text(tab.asset.raw_text)
-            self._suppress_dirty = False
-            tab.textview.set_editable(
-                not self.read_only and not self.preview_mode)
+        self._suppress_dirty = True
+        buf.set_text(tab.asset.raw_text if tab.asset is not None else "")
+        self._suppress_dirty = False
         tab.dirty = False
+        tab.refresh_title()
         self._render_tab(tab)
-        if tab.label:
-            tab.label.set_text(self._tab_title(tab))
         self.update_status()
 
     def _render_tab(self, tab):
+        """Swap a tab body between the editor and the preview card, honouring
+        the tab's own preview/read-only state."""
         for child in tab.container.get_children():
             if child is not tab.scroller:
                 tab.container.remove(child)
-        if self.preview_mode and tab.asset is not None:
+        if tab.preview and tab.asset is not None:
             tab.scroller.hide()
             self._sync_asset_from_buffer(tab)
             preview = build_preview(tab.asset, tab.workspace_disp)
@@ -379,15 +350,13 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, Gtk.Window):
         else:
             tab.scroller.show()
             tab.textview.set_editable(
-                tab.asset is not None and not self.read_only)
+                tab.asset is not None and not tab.read_only)
+        tab.refresh_status_icons()
 
     def _sync_asset_from_buffer(self, tab):
         if tab.asset is None:
             return
-        buf = tab.textview.get_buffer()
-        start, end = buf.get_bounds()
-        text = buf.get_text(start, end, True)
-        tab.asset.update_from_raw(text)
+        tab.asset.update_from_raw(tab.get_content())
 
     _suppress_dirty = False
 
@@ -396,8 +365,7 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, Gtk.Window):
             return
         if not tab.dirty:
             tab.dirty = True
-            if tab.label:
-                tab.label.set_text(self._tab_title(tab))
+            tab.refresh_title()
             self.update_status()
 
     def _close_specific_tab(self, tab):
@@ -417,20 +385,16 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, Gtk.Window):
 
     # ----- editor styling (code font + line spacing) ----------------------
     def _apply_editor_style(self, tab):
-        # Apply the configured code font and editor line spacing to one tab's
-        # text view. Font is set via a CSS provider scoped to the widget;
-        # spacing uses TextView's pixels-above/below-lines.
         spacing = self.settings.editor_line_spacing
         tab.textview.set_pixels_above_lines(spacing)
         tab.textview.set_pixels_below_lines(spacing)
-        font = self.settings.code_font
-        provider = getattr(tab, "_css_provider", None)
+        provider = tab._css_provider
         if provider is None:
             provider = Gtk.CssProvider()
             tab._css_provider = provider
             tab.textview.get_style_context().add_provider(
                 provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
-        family, size = _parse_font(font)
+        family, size = _parse_font(self.settings.code_font)
         css = "textview, textview text { font-family: %s; font-size: %dpt; }" % (
             family, size)
         try:
@@ -449,9 +413,23 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, Gtk.Window):
         model, it = selection.get_selected()
         if it is None:
             return
-        folder_path = model[it][NAV_PATH]
-        ws_root = model[it][NAV_WS_ROOT]
-        self._fill_item_list(folder_path, ws_root)
+        kind = model[it][NAV_KIND]
+        if kind == KIND_ALL:
+            self._fill_item_list_all()
+            return
+        self._fill_item_list(model[it][NAV_PATH], model[it][NAV_WS_ROOT])
+
+    def _append_item_row(self, ws, asset_path, ws_root):
+        stem = os.path.splitext(os.path.basename(asset_path))[0]
+        tag, snippet = "", ""
+        try:
+            a = ws.load_asset(asset_path)
+            tag = a.asset_tag()
+            snippet = a.notes_snippet()
+        except Exception:
+            pass
+        self.item_store.append(
+            [naming.humanize(stem), asset_path, ws_root, tag, snippet])
 
     def _fill_item_list(self, folder_path, ws_root):
         self.item_store.clear()
@@ -462,19 +440,20 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, Gtk.Window):
         if node is None:
             return
         for asset_path in node.asset_files:
-            stem = os.path.splitext(os.path.basename(asset_path))[0]
-            tag, snippet = "", ""
-            try:
-                a = ws.load_asset(asset_path)
-                tag = a.asset_tag()
-                snippet = a.notes_snippet()
-            except Exception:
-                pass
-            self.item_store.append(
-                [naming.humanize(stem), asset_path, ws_root, tag, snippet])
+            self._append_item_row(ws, asset_path, ws_root)
         count = len(node.asset_files)
         self.set_status("%d asset%s in this folder"
                         % (count, "" if count == 1 else "s"))
+
+    def _fill_item_list_all(self):
+        self.item_store.clear()
+        total = 0
+        for ws in self.workspaces:
+            for asset_path in ws.all_asset_files():
+                self._append_item_row(ws, asset_path, ws.root)
+                total += 1
+        self.set_status("%d asset%s across all workspaces"
+                        % (total, "" if total == 1 else "s"))
 
     def on_filter_changed(self, _entry):
         self.item_filter.refilter()
@@ -523,9 +502,21 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, Gtk.Window):
     def _after_tab_switch(self):
         tab = self._current_tab()
         if tab:
+            self._sync_toggles_to_tab(tab)
             self._render_tab(tab)
             self.update_status()
         return False
+
+    def _sync_toggles_to_tab(self, tab):
+        """Reflect the active tab's per-tab read-only/preview onto the toolbar
+        + menu toggles, and mirror them onto the window fields the status bar
+        reads. Guarded so setting the widgets doesn't re-fire the handlers."""
+        self.read_only = tab.read_only
+        self.preview_mode = tab.preview
+        self._sync_toggle(self.btn_readonly, self.mi_readonly, self.read_only)
+        self._sync_toggle(self.btn_preview, self.mi_preview, self.preview_mode)
+        self.btn_readonly.set_sensitive(not self.preview_mode)
+        self.mi_readonly.set_sensitive(not self.preview_mode)
 
     # ====================================================================
     # Action handlers
@@ -543,7 +534,7 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, Gtk.Window):
 
     def on_new_asset(self, *_):
         model, it = self.nav_view.get_selection().get_selected()
-        if it is None:
+        if it is None or model[it][NAV_KIND] in (KIND_ALL,):
             self.set_status("Select a workspace or folder first.")
             return
         folder_path = model[it][NAV_PATH]
@@ -573,10 +564,10 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, Gtk.Window):
         if tab is None or tab.asset is None:
             self.set_status("Nothing to save in this tab.")
             return
-        if self.read_only:
+        if tab.read_only:
             self.set_status("Read-only mode is on \u2014 cannot save.")
             return
-        if not self.preview_mode:
+        if not tab.preview:
             self._sync_asset_from_buffer(tab)
         try:
             tab.asset.save()
@@ -584,7 +575,7 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, Gtk.Window):
             self.set_status("Save failed: %s" % exc)
             return
         tab.dirty = False
-        tab.label.set_text(self._tab_title(tab))
+        tab.refresh_title()
         self.set_status("Saved %s" % os.path.basename(tab.asset.path))
 
     def on_open_workspace(self, *_):
@@ -605,6 +596,7 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, Gtk.Window):
         ws_root = model[it][NAV_WS_ROOT]
         ws = self._workspace_for_root(ws_root)
         if ws is None:
+            self.set_status("Select a workspace to close.")
             return
         self.workspaces.remove(ws)
         self.settings.note_closed(ws_root)
@@ -615,7 +607,7 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, Gtk.Window):
 
     def on_new_folder(self, *_):
         model, it = self.nav_view.get_selection().get_selected()
-        if it is None:
+        if it is None or model[it][NAV_KIND] == KIND_ALL:
             self.set_status("Select a workspace or folder first.")
             return
         parent_path = model[it][NAV_PATH]
@@ -643,7 +635,6 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, Gtk.Window):
         dlg.run_modal()
 
     def _apply_preferences(self):
-        # Live-apply every preference-backed setting to the running window.
         self._apply_toolbar_style()
         self._apply_editor_style_all()
 
@@ -659,7 +650,6 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, Gtk.Window):
 
     # ----- toggle sync helper (toolbar <-> menu) ---------------------------
     def _sync_toggle(self, button, menu_item, active):
-        """Set a ToggleToolButton and a CheckMenuItem without re-firing."""
         self._syncing_view_toggles = True
         try:
             button.set_active(active)
@@ -667,11 +657,10 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, Gtk.Window):
         finally:
             self._syncing_view_toggles = False
 
-    # ----- card view --------------------------------------------------------
+    # ----- card view (app-wide) --------------------------------------------
     def _set_card_view(self, value):
         self.card_view = bool(value)
         self._sync_toggle(self.btn_cardview, self.mi_cardview, self.card_view)
-        # Re-render the items pane in the new mode.
         self.item_view.get_column(0).queue_resize()
         self.item_view.queue_draw()
         self.set_status("Card view %s" % ("on" if self.card_view else "off"))
@@ -686,16 +675,19 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, Gtk.Window):
             return
         self._set_card_view(item.get_active())
 
-    # ----- read-only --------------------------------------------------------
+    # ----- read-only (per active tab) --------------------------------------
     def _set_read_only(self, value):
+        tab = self._current_tab()
         self.read_only = bool(value)
-        self._sync_toggle(self.btn_readonly, self.mi_readonly, self.read_only)
+        # Remember the latest choice as the default for new tabs.
         self.settings["read_only"] = self.read_only
         self.settings.save()
-        for tab in self.tabs:
+        self._sync_toggle(self.btn_readonly, self.mi_readonly, self.read_only)
+        if tab is not None:
+            tab.read_only = self.read_only
             tab.textview.set_editable(
-                tab.asset is not None and not self.read_only
-                and not self.preview_mode)
+                tab.asset is not None and not tab.read_only and not tab.preview)
+            tab.refresh_status_icons()
         self.update_status()
 
     def on_toggle_read_only(self, button):
@@ -708,15 +700,16 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, Gtk.Window):
             return
         self._set_read_only(item.get_active())
 
-    # ----- preview ----------------------------------------------------------
+    # ----- preview (per active tab) ----------------------------------------
     def _set_preview(self, value):
+        tab = self._current_tab()
         self.preview_mode = bool(value)
         self._sync_toggle(self.btn_preview, self.mi_preview, self.preview_mode)
-        # While previewing, the Read-only toggle is disabled (preview is always
-        # read-only) — mirrors qdvc-markdown-notebook.
+        # Preview is read-only by construction → lock the Read-only toggle.
         self.btn_readonly.set_sensitive(not self.preview_mode)
         self.mi_readonly.set_sensitive(not self.preview_mode)
-        for tab in self.tabs:
+        if tab is not None:
+            tab.preview = self.preview_mode
             self._render_tab(tab)
         self.update_status()
 
@@ -788,9 +781,7 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, Gtk.Window):
         self.update_status()
 
     def update_status(self):
-        # Bold mode label on the left; message pushed onto the Gtk.Statusbar.
-        # Preview overrides the read-only/edit label (same precedence as the
-        # notebook).
+        # Bold mode label reflects the ACTIVE tab; preview overrides read-only.
         if self.preview_mode:
             self.mode_label.set_markup("<b>PREVIEW</b>")
         elif self.read_only:
@@ -811,14 +802,3 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, Gtk.Window):
     def on_destroy(self, *_):
         self.settings.save()
         Gtk.main_quit()
-
-
-def _parse_font(font_desc):
-    """Split a Pango font string like 'monospace 11' into (family, size_pt)."""
-    parts = str(font_desc).split()
-    size = 11
-    if parts and parts[-1].isdigit():
-        size = int(parts[-1])
-        parts = parts[:-1]
-    family = " ".join(parts) or "monospace"
-    return family, size
