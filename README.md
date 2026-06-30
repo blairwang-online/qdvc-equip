@@ -34,9 +34,19 @@ set of materials — an **asset** — is a single `.yml` file.
   with a location breadcrumb, location notes, and copyable asset-information
   rows.
 
-Plus a menu bar (**File / Edit / View / Help**, with `Alt+F` … `Alt+H`), a
-toolbar (**New tab · New asset · Save asset · Card view · Read-only ·
-Preview**), and a status bar that shows the current mode.
+Plus a menu bar (**File / Edit / View / Help**, with `Alt+F` … `Alt+H`, icons
+on items), a toolbar (**New tab · New asset · Save asset · Card view ·
+Read-only · Preview**), and a status bar with a bold mode indicator
+(READ-ONLY / EDIT / PREVIEW) followed by a message area.
+
+**Card view** (toolbar/`Ctrl+D`) turns each row in the items pane into a small
+card: the asset name in bold, then its asset tag, then a snippet of its
+location notes. **Preview** (`Ctrl+\``) renders the asset as a card in pane 3;
+turning it on disables the Read-only toggle, since preview is always read-only.
+
+**Edit → Preferences** lets you set the editor's *Code font* and *Editor line
+spacing*, and the toolbar's *icon text placement* (beside vs below the icons).
+Changes preview live; Save persists them, Cancel reverts.
 
 ## Preview cards
 
@@ -114,6 +124,9 @@ sudo apt install python3-gi gir1.2-gtk-3.0 python3-yaml
 | Save asset      | `Ctrl+S` |
 | Open workspace  | `Ctrl+O` |
 | Close tab       | `Ctrl+W` |
+| Card view       | `Ctrl+D` |
+| Read-only       | `Ctrl+E` |
+| Preview         | `` Ctrl+` `` |
 | Refresh         | `F5`     |
 | Quit            | `Ctrl+Q` |
 

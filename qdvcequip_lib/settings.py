@@ -9,6 +9,13 @@ Stored keys:
     recent_workspaces: most-recently-opened workspace paths (capped).
     show_toolbar / show_statusbar: View-menu toggles.
     read_only: whether the app starts in read-only mode.
+    code_font: Pango font description for the YAML/plaintext editor.
+    editor_line_spacing: extra pixels of inter-line spacing in the editor.
+    toolbar_style: "beside" or "below" — toolbar icon text placement.
+
+The font / spacing / toolbar-style keys back the Edit -> Preferences dialog
+(see gtk3_preferences.py). They are defined here, in the GTK-free core, so the
+bounds and defaults can be validated and unit-tested without a display.
 """
 
 import io
@@ -25,12 +32,26 @@ from . import __app_id__
 
 _MAX_RECENT = 10
 
+# --- Preferences-backed constants -----------------------------------------
+DEFAULT_CODE_FONT = "monospace 11"
+
+DEFAULT_EDITOR_LINE_SPACING = 0
+MIN_LINE_SPACING = 0
+MAX_LINE_SPACING = 40
+
+TOOLBAR_TEXT_BESIDE = "beside"
+TOOLBAR_TEXT_BELOW = "below"
+DEFAULT_TOOLBAR_STYLE = TOOLBAR_TEXT_BELOW
+
 _DEFAULTS = {
     "open_workspaces": [],
     "recent_workspaces": [],
     "show_toolbar": True,
     "show_statusbar": True,
     "read_only": True,
+    "code_font": DEFAULT_CODE_FONT,
+    "editor_line_spacing": DEFAULT_EDITOR_LINE_SPACING,
+    "toolbar_style": DEFAULT_TOOLBAR_STYLE,
 }
 
 
@@ -43,6 +64,13 @@ def config_path():
     return os.path.join(config_dir(), "config.yml")
 
 
+def _clamp_spacing(value, fallback):
+    try:
+        return max(MIN_LINE_SPACING, min(MAX_LINE_SPACING, int(value)))
+    except (TypeError, ValueError):
+        return fallback
+
+
 class Settings(object):
     """Load/save a small dict of user settings."""
 
@@ -50,6 +78,14 @@ class Settings(object):
         self._data = dict(_DEFAULTS)
         if data:
             self._data.update(data)
+        # Coerce the typed/bounded keys.
+        self._data["editor_line_spacing"] = _clamp_spacing(
+            self._data.get("editor_line_spacing"), DEFAULT_EDITOR_LINE_SPACING
+        )
+        if self._data.get("toolbar_style") not in (
+            TOOLBAR_TEXT_BESIDE, TOOLBAR_TEXT_BELOW
+        ):
+            self._data["toolbar_style"] = DEFAULT_TOOLBAR_STYLE
 
     # dict-ish access
     def __getitem__(self, key):
@@ -60,6 +96,32 @@ class Settings(object):
 
     def get(self, key, default=None):
         return self._data.get(key, default)
+
+    # ----- typed convenience properties + setters -------------------------
+    @property
+    def code_font(self):
+        return self._data["code_font"]
+
+    def set_code_font(self, value):
+        if isinstance(value, str) and value.strip():
+            self._data["code_font"] = value
+
+    @property
+    def editor_line_spacing(self):
+        return self._data["editor_line_spacing"]
+
+    def set_editor_line_spacing(self, value):
+        self._data["editor_line_spacing"] = _clamp_spacing(
+            value, self._data["editor_line_spacing"]
+        )
+
+    @property
+    def toolbar_style(self):
+        return self._data["toolbar_style"]
+
+    def set_toolbar_style(self, value):
+        if value in (TOOLBAR_TEXT_BESIDE, TOOLBAR_TEXT_BELOW):
+            self._data["toolbar_style"] = value
 
     # ----- recent / open workspace bookkeeping ----------------------------
     def note_opened(self, path):

@@ -1,19 +1,25 @@
 """gtk3_window.py — the main application window (GTK3 view/controller).
 
-Assembles the GNOME2-era layout: a menubar (File / Edit / View / Help with
-Alt-mnemonics), a toolbar (New tab / New asset / Save asset / Card view /
-Read-only / Preview), three horizontal panes (navigation tree, item list, item
-details) inside nested paned widgets, and a status bar.
+Assembles the GNOME2-era layout and wires user actions to the GTK-free core.
+The heavy menu-bar and toolbar construction live in sibling mixins
+(gtk3_menubar.MenuBarMixin, gtk3_toolbar.ToolbarMixin) which are combined into
+EquipWindow here, keeping this file focused on layout, the three panes, the
+notebook of asset tabs, and the action handlers.
 
-Multi-workspace support: the navigation tree (pane 1) holds one expandable
-root per open workspace, each rendering the full nested folder hierarchy.
-Selecting a folder fills the item list (pane 2) with the assets directly under
-it; selecting an asset opens it in the active tab of the details notebook
-(pane 3). Each tab shows either the plaintext YAML editor or, when Preview is
-on, the rendered card from gtk3_preview.
+Layout: menubar, toolbar, three horizontal panes (navigation tree, items,
+item details) in nested Gtk.Paned, and a status bar with a bold mode label
+followed by a Gtk.Statusbar (matching qdvc-markdown-notebook's footer).
 
-Read-only and Preview are app-wide toggles mirrored between the toolbar and the
-View menu, matching the reference notebook's behaviour.
+Multi-workspace: the navigation tree (pane 1) holds one expandable root per
+open workspace, each rendering the full nested folder hierarchy. Selecting a
+folder fills the items pane (pane 2); selecting an asset opens it in the active
+tab of the details notebook (pane 3). Each tab shows either the plaintext YAML
+editor or, when Preview is on, the rendered card from gtk3_preview.
+
+Read-only / Preview / Card view are app-wide toggles mirrored between the
+toolbar and the View menu via _sync_toggle (guarded against feedback loops).
+Activating Preview disables the Read-only toggle, since preview is read-only by
+construction — exactly as in the notebook.
 """
 
 import os
@@ -30,14 +36,23 @@ from .settings import Settings
 from .asset import Asset
 from . import naming
 from .gtk3_preview import build_preview
+from .gtk3_menubar import MenuBarMixin
+from .gtk3_toolbar import ToolbarMixin
+from .gtk3_preferences import PreferencesDialog
 
 # Navigation tree column indices.
 NAV_LABEL, NAV_KIND, NAV_PATH, NAV_WS_ROOT = range(4)
-# kinds:
 KIND_WORKSPACE = "workspace"
 KIND_FOLDER = "folder"
-# Item list column indices.
-ITEM_LABEL, ITEM_PATH, ITEM_WS_ROOT = range(3)
+
+# Item list column indices: label, path, ws_root, tag (card line 2),
+# notes snippet (card line 3).
+ITEM_LABEL, ITEM_PATH, ITEM_WS_ROOT, ITEM_TAG, ITEM_SNIPPET = range(5)
+
+
+def _xml_escape(text):
+    return (str(text).replace("&", "&amp;")
+            .replace("<", "&lt;").replace(">", "&gt;"))
 
 
 class AssetTab(object):
@@ -53,7 +68,7 @@ class AssetTab(object):
         self.dirty = False
 
 
-class EquipWindow(Gtk.Window):
+class EquipWindow(MenuBarMixin, ToolbarMixin, Gtk.Window):
     """Top-level QDVC Equip window."""
 
     def __init__(self, workspace_paths=None):
@@ -63,13 +78,14 @@ class EquipWindow(Gtk.Window):
         self.settings = Settings.load()
         self.workspaces = []            # list[Workspace]
         self.read_only = bool(self.settings["read_only"])
-        self.preview_on = False
+        self.preview_mode = False
+        self.card_view = False
         self.tabs = []                  # list[AssetTab]
+        self._last_status = "Ready"
 
         self._build_ui()
         self._apply_view_settings()
 
-        # Open workspaces from CLI args, else from persisted session.
         to_open = list(workspace_paths or [])
         if not to_open:
             to_open = list(self.settings["open_workspaces"])
@@ -79,6 +95,7 @@ class EquipWindow(Gtk.Window):
 
         if not self.tabs:
             self.new_tab()
+        self._rebuild_recent_menu()
         self.connect("destroy", self.on_destroy)
 
     # ====================================================================
@@ -88,14 +105,9 @@ class EquipWindow(Gtk.Window):
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.add(root)
 
-        self.accels = Gtk.AccelGroup()
-        self.add_accel_group(self.accels)
-
         root.pack_start(self._build_menubar(), False, False, 0)
-        self.toolbar = self._build_toolbar()
-        root.pack_start(self.toolbar, False, False, 0)
+        root.pack_start(self._build_toolbar(), False, False, 0)
 
-        # Three panes via nested Gtk.Paned.
         self.outer_paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         self.inner_paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         self.outer_paned.pack1(self._build_nav_pane(), resize=False, shrink=False)
@@ -106,144 +118,29 @@ class EquipWindow(Gtk.Window):
         self.inner_paned.set_position(280)
         root.pack_start(self.outer_paned, True, True, 0)
 
-        # Status bar.
+        root.pack_start(self._build_statusbar(), False, False, 0)
+        self.update_status()
+
+    # ----- status bar -------------------------------------------------------
+    def _build_statusbar(self):
+        # Footer: a bold mode indicator on the left, then a Gtk.Statusbar
+        # filling the rest (same layout/style as qdvc-markdown-notebook).
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        self.statusbar_box = box
+        self.mode_label = Gtk.Label()
+        self.mode_label.set_margin_start(6)
+        self.mode_label.set_margin_end(6)
+        box.pack_start(self.mode_label, False, False, 0)
         self.statusbar = Gtk.Statusbar()
         self._status_ctx = self.statusbar.get_context_id("main")
-        root.pack_start(self.statusbar, False, False, 0)
-        self._refresh_status()
-
-    # ----- menubar ---------------------------------------------------------
-    def _build_menubar(self):
-        menubar = Gtk.MenuBar()
-
-        # File
-        file_menu = Gtk.Menu()
-        file_item = Gtk.MenuItem.new_with_mnemonic("_File")
-        file_item.set_submenu(file_menu)
-        self._menu_item(file_menu, "_New tab", self.on_new_tab,
-                        key=Gdk.KEY_t, mod=Gdk.ModifierType.CONTROL_MASK)
-        self._menu_item(file_menu, "New _asset", self.on_new_asset,
-                        key=Gdk.KEY_n, mod=Gdk.ModifierType.CONTROL_MASK)
-        self._menu_item(file_menu, "_Save asset", self.on_save_asset,
-                        key=Gdk.KEY_s, mod=Gdk.ModifierType.CONTROL_MASK)
-        file_menu.append(Gtk.SeparatorMenuItem())
-        self._menu_item(file_menu, "_Open workspace\u2026", self.on_open_workspace,
-                        key=Gdk.KEY_o, mod=Gdk.ModifierType.CONTROL_MASK)
-        self._menu_item(file_menu, "_Close workspace", self.on_close_workspace)
-        self.recent_menu_item = Gtk.MenuItem.new_with_mnemonic("Open _recent")
-        self.recent_menu = Gtk.Menu()
-        self.recent_menu_item.set_submenu(self.recent_menu)
-        file_menu.append(self.recent_menu_item)
-        self._rebuild_recent_menu()
-        file_menu.append(Gtk.SeparatorMenuItem())
-        self._menu_item(file_menu, "Close _tab", self.on_close_tab,
-                        key=Gdk.KEY_w, mod=Gdk.ModifierType.CONTROL_MASK)
-        self._menu_item(file_menu, "_Quit", lambda *_: self.close(),
-                        key=Gdk.KEY_q, mod=Gdk.ModifierType.CONTROL_MASK)
-        menubar.append(file_item)
-
-        # Edit
-        edit_menu = Gtk.Menu()
-        edit_item = Gtk.MenuItem.new_with_mnemonic("_Edit")
-        edit_item.set_submenu(edit_menu)
-        self._menu_item(edit_menu, "_New folder\u2026", self.on_new_folder)
-        self._menu_item(edit_menu, "_Refresh workspaces", self.on_refresh,
-                        key=Gdk.KEY_F5, mod=0)
-        menubar.append(edit_item)
-
-        # View
-        view_menu = Gtk.Menu()
-        view_item = Gtk.MenuItem.new_with_mnemonic("_View")
-        view_item.set_submenu(view_menu)
-        self.mi_toolbar = Gtk.CheckMenuItem.new_with_mnemonic("Show _Toolbar")
-        self.mi_toolbar.set_active(bool(self.settings["show_toolbar"]))
-        self.mi_toolbar.connect("toggled", self.on_toggle_toolbar)
-        view_menu.append(self.mi_toolbar)
-        self.mi_statusbar = Gtk.CheckMenuItem.new_with_mnemonic("Show _Statusbar")
-        self.mi_statusbar.set_active(bool(self.settings["show_statusbar"]))
-        self.mi_statusbar.connect("toggled", self.on_toggle_statusbar)
-        view_menu.append(self.mi_statusbar)
-        view_menu.append(Gtk.SeparatorMenuItem())
-        self.mi_readonly = Gtk.CheckMenuItem.new_with_mnemonic("_Read-only")
-        self.mi_readonly.set_active(self.read_only)
-        self.mi_readonly.connect("toggled", self.on_menu_readonly)
-        view_menu.append(self.mi_readonly)
-        self.mi_preview = Gtk.CheckMenuItem.new_with_mnemonic("_Preview")
-        self.mi_preview.set_active(self.preview_on)
-        self.mi_preview.connect("toggled", self.on_menu_preview)
-        view_menu.append(self.mi_preview)
-        menubar.append(view_item)
-
-        # Help
-        help_menu = Gtk.Menu()
-        help_item = Gtk.MenuItem.new_with_mnemonic("_Help")
-        help_item.set_submenu(help_menu)
-        self._menu_item(help_menu, "_About", self.on_about)
-        menubar.append(help_item)
-
-        return menubar
-
-    def _menu_item(self, menu, label, handler, key=None, mod=None):
-        item = Gtk.MenuItem.new_with_mnemonic(label)
-        item.connect("activate", handler)
-        if key is not None:
-            item.add_accelerator(
-                "activate", self.accels, key, mod or 0,
-                Gtk.AccelFlags.VISIBLE,
-            )
-        menu.append(item)
-        return item
-
-    # ----- toolbar ----------------------------------------------------------
-    def _build_toolbar(self):
-        tb = Gtk.Toolbar()
-        tb.set_style(Gtk.ToolbarStyle.BOTH_HORIZ)
-
-        def tool_button(label, icon, handler, tip):
-            btn = Gtk.ToolButton()
-            btn.set_label(label)
-            btn.set_icon_name(icon)
-            btn.set_is_important(True)
-            btn.set_tooltip_text(tip)
-            btn.connect("clicked", handler)
-            tb.insert(btn, -1)
-            return btn
-
-        def toggle_button(label, icon, handler, tip, active=False):
-            btn = Gtk.ToggleToolButton()
-            btn.set_label(label)
-            btn.set_icon_name(icon)
-            btn.set_is_important(True)
-            btn.set_tooltip_text(tip)
-            btn.set_active(active)
-            handler_id = btn.connect("toggled", handler)
-            tb.insert(btn, -1)
-            return btn, handler_id
-
-        tool_button("New tab", "tab-new", self.on_new_tab, "Open a new tab")
-        tool_button("New asset", "document-new", self.on_new_asset,
-                    "Create a new asset")
-        tool_button("Save asset", "document-save", self.on_save_asset,
-                    "Save the current asset")
-        tb.insert(Gtk.SeparatorToolItem(), -1)
-        self.tb_cardview, self.tb_cardview_hid = toggle_button(
-            "Card view", "view-grid-symbolic", self.on_toggle_cardview,
-            "Show the item list as cards")
-        self.tb_readonly, self.tb_readonly_hid = toggle_button(
-            "Read-only", "changes-prevent-symbolic", self.on_toolbar_readonly,
-            "Toggle read-only mode (applies to all tabs)",
-            active=self.read_only)
-        self.tb_preview, self.tb_preview_hid = toggle_button(
-            "Preview", "view-reveal-symbolic", self.on_toolbar_preview,
-            "Render the asset as a card instead of YAML text")
-        return tb
+        box.pack_start(self.statusbar, True, True, 0)
+        return box
 
     # ----- pane 1: navigation tree -----------------------------------------
     def _build_nav_pane(self):
         frame = Gtk.Frame()
         sw = Gtk.ScrolledWindow()
         sw.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        # columns: label, kind, path, ws_root
         self.nav_store = Gtk.TreeStore(str, str, str, str)
         self.nav_view = Gtk.TreeView(model=self.nav_store)
         self.nav_view.set_headers_visible(False)
@@ -262,10 +159,9 @@ class EquipWindow(Gtk.Window):
 
     def _nav_icon_func(self, _col, cell, model, it, _data):
         kind = model[it][NAV_KIND]
-        if kind == KIND_WORKSPACE:
-            cell.set_property("icon-name", "drive-harddisk")
-        else:
-            cell.set_property("icon-name", "folder")
+        cell.set_property(
+            "icon-name",
+            "drive-harddisk" if kind == KIND_WORKSPACE else "folder")
 
     # ----- pane 2: item list -----------------------------------------------
     def _build_item_pane(self):
@@ -278,19 +174,24 @@ class EquipWindow(Gtk.Window):
 
         sw = Gtk.ScrolledWindow()
         sw.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        self.item_store = Gtk.ListStore(str, str, str)  # label, path, ws_root
+        # label, path, ws_root, tag, snippet
+        self.item_store = Gtk.ListStore(str, str, str, str, str)
         self.item_filter = self.item_store.filter_new()
         self.item_filter.set_visible_func(self._item_visible_func)
         self.item_view = Gtk.TreeView(model=self.item_filter)
         self.item_view.set_headers_visible(False)
+
         col = Gtk.TreeViewColumn("Asset")
         icon = Gtk.CellRendererPixbuf()
         icon.set_property("icon-name", "package-x-generic")
         col.pack_start(icon, False)
-        text = Gtk.CellRendererText()
-        col.pack_start(text, True)
-        col.add_attribute(text, "text", ITEM_LABEL)
+        self._item_text_renderer = Gtk.CellRendererText()
+        self._item_text_renderer.set_property(
+            "ellipsize", Pango.EllipsizeMode.END)
+        col.pack_start(self._item_text_renderer, True)
+        col.set_cell_data_func(self._item_text_renderer, self._item_cell_data)
         self.item_view.append_column(col)
+
         self.item_view.get_selection().connect("changed", self.on_item_selected)
         self.item_view.connect("row-activated", self.on_item_activated)
         sw.add(self.item_view)
@@ -302,7 +203,36 @@ class EquipWindow(Gtk.Window):
         term = self.search_entry.get_text().strip().lower()
         if not term:
             return True
-        return term in (model[it][ITEM_LABEL] or "").lower()
+        hay = " ".join([
+            model[it][ITEM_LABEL] or "",
+            model[it][ITEM_TAG] or "",
+            model[it][ITEM_SNIPPET] or "",
+        ]).lower()
+        return term in hay
+
+    def _item_cell_data(self, _col, cell, store, it, _data):
+        """Render an items-pane row as a plain title (list) or a 3-line card.
+
+        GTK calls this for each visible row just before painting. In list view
+        the row is just the asset name. In card view it is three lines: the
+        bold name, the asset tag, then a location-notes snippet. Sub-lines are
+        italic and slightly smaller so they sit beneath the title without
+        clashing with the selection highlight.
+        """
+        title = _xml_escape(store[it][ITEM_LABEL])
+        if not self.card_view:
+            cell.set_property("ypad", 0)
+            cell.set_property("markup", title)
+            return
+        tag = _xml_escape(store[it][ITEM_TAG])
+        snippet = _xml_escape(store[it][ITEM_SNIPPET])
+        sub = ""
+        if tag:
+            sub += "\n<i><span size='small'>%s</span></i>" % tag
+        if snippet:
+            sub += "\n<i><span size='small'>%s</span></i>" % snippet
+        cell.set_property("ypad", 2)
+        cell.set_property("markup", "<b>%s</b>%s" % (title, sub))
 
     # ----- pane 3: details notebook ----------------------------------------
     def _build_details_pane(self):
@@ -334,8 +264,7 @@ class EquipWindow(Gtk.Window):
 
     def _add_workspace_to_nav(self, ws):
         ws_iter = self.nav_store.append(
-            None, [ws.display_name, KIND_WORKSPACE, ws.root, ws.root]
-        )
+            None, [ws.display_name, KIND_WORKSPACE, ws.root, ws.root])
         self._populate_folder_children(ws_iter, ws.root_node, ws.root)
         self.nav_view.expand_row(self.nav_store.get_path(ws_iter), False)
 
@@ -343,8 +272,7 @@ class EquipWindow(Gtk.Window):
         for child in node.children:
             child_iter = self.nav_store.append(
                 parent_iter,
-                [child.display_name, KIND_FOLDER, child.path, ws_root],
-            )
+                [child.display_name, KIND_FOLDER, child.path, ws_root])
             self._populate_folder_children(child_iter, child, ws_root)
 
     def _workspace_for_root(self, ws_root):
@@ -354,7 +282,6 @@ class EquipWindow(Gtk.Window):
         return None
 
     def refresh_workspaces(self):
-        # Remember which folder was selected, rebuild, then try to reselect.
         self.nav_store.clear()
         for ws in self.workspaces:
             ws.refresh()
@@ -379,6 +306,7 @@ class EquipWindow(Gtk.Window):
         tab.textview.get_buffer().connect("changed", self._on_buffer_changed, tab)
         tab.scroller.add(tab.textview)
         tab.container.pack_start(tab.scroller, True, True, 0)
+        self._apply_editor_style(tab)
 
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         tab.label = Gtk.Label(label=self._tab_title(tab))
@@ -420,30 +348,30 @@ class EquipWindow(Gtk.Window):
         return None
 
     def _load_tab_content(self, tab):
-        """Fill a tab's editor buffer from its asset (or a placeholder)."""
         buf = tab.textview.get_buffer()
         if tab.asset is None:
+            self._suppress_dirty = True
             buf.set_text("")
+            self._suppress_dirty = False
             tab.textview.set_editable(False)
         else:
             self._suppress_dirty = True
             buf.set_text(tab.asset.raw_text)
             self._suppress_dirty = False
-            tab.textview.set_editable(not self.read_only and not self.preview_on)
+            tab.textview.set_editable(
+                not self.read_only and not self.preview_mode)
         tab.dirty = False
         self._render_tab(tab)
         if tab.label:
             tab.label.set_text(self._tab_title(tab))
+        self.update_status()
 
     def _render_tab(self, tab):
-        """Swap the tab body between plaintext editor and preview card."""
-        # Remove any non-scroller child (a previous preview).
         for child in tab.container.get_children():
             if child is not tab.scroller:
                 tab.container.remove(child)
-        if self.preview_on and tab.asset is not None:
+        if self.preview_mode and tab.asset is not None:
             tab.scroller.hide()
-            # Sync structured fields from possibly-edited text first.
             self._sync_asset_from_buffer(tab)
             preview = build_preview(tab.asset, tab.workspace_disp)
             tab.container.pack_start(preview, True, True, 0)
@@ -451,8 +379,7 @@ class EquipWindow(Gtk.Window):
         else:
             tab.scroller.show()
             tab.textview.set_editable(
-                tab.asset is not None and not self.read_only
-            )
+                tab.asset is not None and not self.read_only)
 
     def _sync_asset_from_buffer(self, tab):
         if tab.asset is None:
@@ -471,6 +398,7 @@ class EquipWindow(Gtk.Window):
             tab.dirty = True
             if tab.label:
                 tab.label.set_text(self._tab_title(tab))
+            self.update_status()
 
     def _close_specific_tab(self, tab):
         if tab not in self.tabs:
@@ -482,9 +410,37 @@ class EquipWindow(Gtk.Window):
         if not self.tabs:
             self.new_tab()
         self._update_tabbar_visibility()
+        self.update_status()
 
     def _update_tabbar_visibility(self):
         self.notebook.set_show_tabs(len(self.tabs) > 1)
+
+    # ----- editor styling (code font + line spacing) ----------------------
+    def _apply_editor_style(self, tab):
+        # Apply the configured code font and editor line spacing to one tab's
+        # text view. Font is set via a CSS provider scoped to the widget;
+        # spacing uses TextView's pixels-above/below-lines.
+        spacing = self.settings.editor_line_spacing
+        tab.textview.set_pixels_above_lines(spacing)
+        tab.textview.set_pixels_below_lines(spacing)
+        font = self.settings.code_font
+        provider = getattr(tab, "_css_provider", None)
+        if provider is None:
+            provider = Gtk.CssProvider()
+            tab._css_provider = provider
+            tab.textview.get_style_context().add_provider(
+                provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        family, size = _parse_font(font)
+        css = "textview, textview text { font-family: %s; font-size: %dpt; }" % (
+            family, size)
+        try:
+            provider.load_from_data(css.encode("utf-8"))
+        except Exception:
+            pass
+
+    def _apply_editor_style_all(self):
+        for tab in self.tabs:
+            self._apply_editor_style(tab)
 
     # ====================================================================
     # Selection handlers
@@ -493,13 +449,11 @@ class EquipWindow(Gtk.Window):
         model, it = selection.get_selected()
         if it is None:
             return
-        kind = model[it][NAV_KIND]
         folder_path = model[it][NAV_PATH]
         ws_root = model[it][NAV_WS_ROOT]
-        self._fill_item_list(folder_path, ws_root, include_workspace_root=(
-            kind == KIND_WORKSPACE))
+        self._fill_item_list(folder_path, ws_root)
 
-    def _fill_item_list(self, folder_path, ws_root, include_workspace_root):
+    def _fill_item_list(self, folder_path, ws_root):
         self.item_store.clear()
         ws = self._workspace_for_root(ws_root)
         if ws is None:
@@ -509,9 +463,15 @@ class EquipWindow(Gtk.Window):
             return
         for asset_path in node.asset_files:
             stem = os.path.splitext(os.path.basename(asset_path))[0]
+            tag, snippet = "", ""
+            try:
+                a = ws.load_asset(asset_path)
+                tag = a.asset_tag()
+                snippet = a.notes_snippet()
+            except Exception:
+                pass
             self.item_store.append(
-                [naming.humanize(stem), asset_path, ws_root]
-            )
+                [naming.humanize(stem), asset_path, ws_root, tag, snippet])
         count = len(node.asset_files)
         self.set_status("%d asset%s in this folder"
                         % (count, "" if count == 1 else "s"))
@@ -523,12 +483,10 @@ class EquipWindow(Gtk.Window):
         model, it = selection.get_selected()
         if it is None:
             return
-        asset_path = model[it][ITEM_PATH]
-        ws_root = model[it][ITEM_WS_ROOT]
-        self._open_asset_in_current_tab(asset_path, ws_root)
+        self._open_asset_in_current_tab(
+            model[it][ITEM_PATH], model[it][ITEM_WS_ROOT])
 
     def on_item_activated(self, _view, _path, _col):
-        # Double-click / Enter opens in a fresh tab.
         model, it = self.item_view.get_selection().get_selected()
         if it is None:
             return
@@ -538,9 +496,7 @@ class EquipWindow(Gtk.Window):
         ws = self._workspace_for_root(ws_root)
         if ws is None:
             return
-        tab = self._current_tab()
-        if tab is None:
-            tab = self.new_tab()
+        tab = self._current_tab() or self.new_tab()
         try:
             tab.asset = ws.load_asset(asset_path)
         except Exception as exc:
@@ -562,17 +518,17 @@ class EquipWindow(Gtk.Window):
         self.new_tab(asset=asset, workspace_disp=ws.display_name)
 
     def on_tab_switched(self, _nb, _page, _num):
-        # Defer: page widget is set after this signal completes.
         GLib.idle_add(self._after_tab_switch)
 
     def _after_tab_switch(self):
         tab = self._current_tab()
         if tab:
             self._render_tab(tab)
+            self.update_status()
         return False
 
     # ====================================================================
-    # Toolbar / menu action handlers
+    # Action handlers
     # ====================================================================
     def on_new_tab(self, *_):
         self.new_tab()
@@ -582,8 +538,10 @@ class EquipWindow(Gtk.Window):
         if tab:
             self._close_specific_tab(tab)
 
+    def on_quit(self, *_):
+        self.close()
+
     def on_new_asset(self, *_):
-        # Determine target folder from nav selection.
         model, it = self.nav_view.get_selection().get_selected()
         if it is None:
             self.set_status("Select a workspace or folder first.")
@@ -599,8 +557,7 @@ class EquipWindow(Gtk.Window):
         new_path = ws.new_asset_path(folder_path, name)
         asset = Asset(path=None, workspace_root=ws_root)
         asset.name = naming.humanize(
-            os.path.splitext(os.path.basename(new_path))[0]
-        )
+            os.path.splitext(os.path.basename(new_path))[0])
         try:
             asset.save(new_path)
         except Exception as exc:
@@ -619,7 +576,7 @@ class EquipWindow(Gtk.Window):
         if self.read_only:
             self.set_status("Read-only mode is on \u2014 cannot save.")
             return
-        if not self.preview_on:
+        if not self.preview_mode:
             self._sync_asset_from_buffer(tab)
         try:
             tab.asset.save()
@@ -633,12 +590,9 @@ class EquipWindow(Gtk.Window):
     def on_open_workspace(self, *_):
         dialog = Gtk.FileChooserDialog(
             title="Open workspace folder", parent=self,
-            action=Gtk.FileChooserAction.SELECT_FOLDER,
-        )
-        dialog.add_buttons(
-            "_Cancel", Gtk.ResponseType.CANCEL,
-            "_Open", Gtk.ResponseType.ACCEPT,
-        )
+            action=Gtk.FileChooserAction.SELECT_FOLDER)
+        dialog.add_buttons("_Cancel", Gtk.ResponseType.CANCEL,
+                           "_Open", Gtk.ResponseType.ACCEPT)
         if dialog.run() == Gtk.ResponseType.ACCEPT:
             self.open_workspace(dialog.get_filename())
         dialog.destroy()
@@ -684,6 +638,15 @@ class EquipWindow(Gtk.Window):
         self.refresh_workspaces()
         self.set_status("Workspaces refreshed.")
 
+    def on_preferences(self, *_):
+        dlg = PreferencesDialog(self, self.settings, self._apply_preferences)
+        dlg.run_modal()
+
+    def _apply_preferences(self):
+        # Live-apply every preference-backed setting to the running window.
+        self._apply_toolbar_style()
+        self._apply_editor_style_all()
+
     def on_toggle_toolbar(self, item):
         self.settings["show_toolbar"] = item.get_active()
         self.toolbar.set_visible(item.get_active())
@@ -691,64 +654,88 @@ class EquipWindow(Gtk.Window):
 
     def on_toggle_statusbar(self, item):
         self.settings["show_statusbar"] = item.get_active()
-        self.statusbar.set_visible(item.get_active())
+        self.statusbar_box.set_visible(item.get_active())
         self.settings.save()
 
-    def on_toggle_cardview(self, _btn):
-        # Card view is a lightweight presentation toggle for the item list;
-        # here it simply notes status (the list renderer stays text rows).
-        on = self.tb_cardview.get_active()
-        self.set_status("Card view %s" % ("on" if on else "off"))
+    # ----- toggle sync helper (toolbar <-> menu) ---------------------------
+    def _sync_toggle(self, button, menu_item, active):
+        """Set a ToggleToolButton and a CheckMenuItem without re-firing."""
+        self._syncing_view_toggles = True
+        try:
+            button.set_active(active)
+            menu_item.set_active(active)
+        finally:
+            self._syncing_view_toggles = False
 
-    # --- read-only (kept in sync between toolbar + menu) -------------------
-    def on_toolbar_readonly(self, btn):
-        self._set_read_only(btn.get_active(), source="toolbar")
+    # ----- card view --------------------------------------------------------
+    def _set_card_view(self, value):
+        self.card_view = bool(value)
+        self._sync_toggle(self.btn_cardview, self.mi_cardview, self.card_view)
+        # Re-render the items pane in the new mode.
+        self.item_view.get_column(0).queue_resize()
+        self.item_view.queue_draw()
+        self.set_status("Card view %s" % ("on" if self.card_view else "off"))
 
-    def on_menu_readonly(self, item):
-        self._set_read_only(item.get_active(), source="menu")
+    def on_toggle_card_view(self, button):
+        if self._syncing_view_toggles:
+            return
+        self._set_card_view(button.get_active())
 
-    def _set_read_only(self, value, source):
-        self.read_only = value
-        if source != "toolbar":
-            self.tb_readonly.handler_block(self.tb_readonly_hid)
-            self.tb_readonly.set_active(value)
-            self.tb_readonly.handler_unblock(self.tb_readonly_hid)
-        if source != "menu":
-            self.mi_readonly.set_active(value)
-        self.settings["read_only"] = value
+    def on_menu_toggle_card_view(self, item):
+        if self._syncing_view_toggles:
+            return
+        self._set_card_view(item.get_active())
+
+    # ----- read-only --------------------------------------------------------
+    def _set_read_only(self, value):
+        self.read_only = bool(value)
+        self._sync_toggle(self.btn_readonly, self.mi_readonly, self.read_only)
+        self.settings["read_only"] = self.read_only
         self.settings.save()
         for tab in self.tabs:
             tab.textview.set_editable(
-                tab.asset is not None and not value and not self.preview_on
-            )
-        self._refresh_status()
+                tab.asset is not None and not self.read_only
+                and not self.preview_mode)
+        self.update_status()
 
-    # --- preview (kept in sync between toolbar + menu) ---------------------
-    def on_toolbar_preview(self, btn):
-        self._set_preview(btn.get_active(), source="toolbar")
+    def on_toggle_read_only(self, button):
+        if self._syncing_view_toggles:
+            return
+        self._set_read_only(button.get_active())
 
-    def on_menu_preview(self, item):
-        self._set_preview(item.get_active(), source="menu")
+    def on_menu_toggle_read_only(self, item):
+        if self._syncing_view_toggles:
+            return
+        self._set_read_only(item.get_active())
 
-    def _set_preview(self, value, source):
-        self.preview_on = value
-        if source != "toolbar":
-            self.tb_preview.handler_block(self.tb_preview_hid)
-            self.tb_preview.set_active(value)
-            self.tb_preview.handler_unblock(self.tb_preview_hid)
-        if source != "menu":
-            self.mi_preview.set_active(value)
+    # ----- preview ----------------------------------------------------------
+    def _set_preview(self, value):
+        self.preview_mode = bool(value)
+        self._sync_toggle(self.btn_preview, self.mi_preview, self.preview_mode)
+        # While previewing, the Read-only toggle is disabled (preview is always
+        # read-only) — mirrors qdvc-markdown-notebook.
+        self.btn_readonly.set_sensitive(not self.preview_mode)
+        self.mi_readonly.set_sensitive(not self.preview_mode)
         for tab in self.tabs:
             self._render_tab(tab)
-        self._refresh_status()
+        self.update_status()
+
+    def on_toggle_preview(self, button):
+        if self._syncing_view_toggles:
+            return
+        self._set_preview(button.get_active())
+
+    def on_menu_toggle_preview(self, item):
+        if self._syncing_view_toggles:
+            return
+        self._set_preview(item.get_active())
 
     def on_about(self, *_):
         dlg = Gtk.AboutDialog(transient_for=self, modal=True)
         dlg.set_program_name(__app_name__)
         dlg.set_version(__version__)
         dlg.set_comments(
-            "Track your tools, equipment, and materials across workspaces."
-        )
+            "Track your tools, equipment, and materials across workspaces.")
         dlg.set_license_type(Gtk.License.MIT_X11)
         dlg.set_logo_icon_name("package-x-generic")
         dlg.run()
@@ -759,10 +746,8 @@ class EquipWindow(Gtk.Window):
     # ====================================================================
     def _prompt_text(self, title, label_text, default=""):
         dialog = Gtk.Dialog(title=title, transient_for=self, modal=True)
-        dialog.add_buttons(
-            "_Cancel", Gtk.ResponseType.CANCEL,
-            "_OK", Gtk.ResponseType.OK,
-        )
+        dialog.add_buttons("_Cancel", Gtk.ResponseType.CANCEL,
+                           "_OK", Gtk.ResponseType.OK)
         box = dialog.get_content_area()
         box.set_spacing(6)
         box.set_border_width(10)
@@ -790,30 +775,50 @@ class EquipWindow(Gtk.Window):
             for path in recents:
                 item = Gtk.MenuItem.new_with_label(path)
                 item.connect(
-                    "activate",
-                    lambda _i, p=path: self.open_workspace(p),
-                )
+                    "activate", lambda _i, p=path: self.open_workspace(p))
                 self.recent_menu.append(item)
         self.recent_menu.show_all()
 
     def _apply_view_settings(self):
         self.toolbar.set_visible(bool(self.settings["show_toolbar"]))
-        self.statusbar.set_visible(bool(self.settings["show_statusbar"]))
+        self.statusbar_box.set_visible(bool(self.settings["show_statusbar"]))
 
     def set_status(self, text):
         self._last_status = text
-        self._refresh_status()
+        self.update_status()
 
-    def _refresh_status(self):
-        mode = "READ-ONLY" if self.read_only else "EDIT"
-        preview = "  |  PREVIEW" if self.preview_on else ""
-        msg = getattr(self, "_last_status", "Ready")
+    def update_status(self):
+        # Bold mode label on the left; message pushed onto the Gtk.Statusbar.
+        # Preview overrides the read-only/edit label (same precedence as the
+        # notebook).
+        if self.preview_mode:
+            self.mode_label.set_markup("<b>PREVIEW</b>")
+        elif self.read_only:
+            self.mode_label.set_markup("<b>READ-ONLY</b>")
+        else:
+            self.mode_label.set_markup("<b>EDIT</b>")
+
+        msg = self._last_status
+        tab = self._current_tab()
+        if tab and tab.dirty:
+            msg += "  *"
+        if len(self.tabs) > 1:
+            idx = self.notebook.get_current_page() + 1
+            msg += "    \u2014    Tab %d of %d" % (idx, len(self.tabs))
         self.statusbar.pop(self._status_ctx)
-        self.statusbar.push(
-            self._status_ctx,
-            "%s    \u2014    Mode: %s%s" % (msg, mode, preview),
-        )
+        self.statusbar.push(self._status_ctx, msg)
 
     def on_destroy(self, *_):
         self.settings.save()
         Gtk.main_quit()
+
+
+def _parse_font(font_desc):
+    """Split a Pango font string like 'monospace 11' into (family, size_pt)."""
+    parts = str(font_desc).split()
+    size = 11
+    if parts and parts[-1].isdigit():
+        size = int(parts[-1])
+        parts = parts[:-1]
+    family = " ".join(parts) or "monospace"
+    return family, size

@@ -29,17 +29,40 @@ qdvcequip_lib/
                            naming convention.
   asset.py         (core)  Asset model + YAML (de)serialisation. Includes a
                            tiny no-PyYAML fallback dumper/loader so the app
-                           runs on a bare install.
+                           runs on a bare install. asset_tag() / notes_snippet()
+                           supply the card-view sub-lines.
   workspace.py     (core)  Workspace + FolderNode tree. Scans the filesystem,
                            enforces workspace-wide name uniqueness, computes
                            new asset/folder paths.
   settings.py      (core)  Persisted settings + recent/open workspace list,
                            stored as YAML under $XDG_CONFIG_HOME/qdvc-equip/.
+                           Also defines the Preferences-backed keys (code_font,
+                           editor_line_spacing, toolbar_style) with bounds.
+  gtk3_menubar.py  (view)  MenuBarMixin: builds the File/Edit/View/Help menus
+                           (icons on items via Gtk.ImageMenuItem). Mixed into
+                           EquipWindow.
+  gtk3_toolbar.py  (view)  ToolbarMixin: builds the toolbar and maps the
+                           toolbar_style setting to a Gtk.ToolbarStyle. Mixed
+                           into EquipWindow. Card view = mail-attachment icon,
+                           Preview = document-page-setup icon (same as the
+                           notebook).
+  gtk3_preferences.py (view) PreferencesDialog: the Edit -> Preferences dialog
+                           (Fonts + Interface tabs) with live preview and
+                           Save/Cancel-revert.
   gtk3_preview.py  (view)  Builds the read-only "card" shown when Preview is on,
                            including the per-row [copy] buttons.
-  gtk3_window.py   (view)  The whole window: menubar, toolbar, three panes,
-                           status bar, tabs, and all action handlers.
+  gtk3_window.py   (view)  EquipWindow itself: layout, the three panes, the
+                           details notebook, the status bar, and all action
+                           handlers. Composes the menubar/toolbar mixins.
 ```
+
+## Mixin composition
+
+`EquipWindow(MenuBarMixin, ToolbarMixin, Gtk.Window)`. The mixins hold only
+`_build_menubar` / `_build_toolbar` (plus toolbar-style helpers) and rely on
+handlers and attributes defined on the window. This keeps `gtk3_window.py`
+focused and mirrors qdvc-markdown-notebook's structure. If you add another
+large UI region, give it its own `*Mixin` rather than growing the window file.
 
 ## Key concepts
 
@@ -72,12 +95,35 @@ Built from two nested `Gtk.Paned`. Column index constants live at module top:
 
 ## Toolbar ↔ menu toggle sync
 
-**Read-only** and **Preview** are app-wide and appear both on the toolbar and in
-the View menu. To avoid feedback loops, the toolbar toggles' handler IDs are
-stored (`tb_readonly_hid`, `tb_preview_hid`) and blocked while syncing from the
-menu. `_set_read_only` / `_set_preview` take a `source=` so they only update the
-*other* widget. If you add a third surface for these toggles, follow the same
-block/unblock pattern.
+**Read-only**, **Preview**, and **Card view** are app-wide and appear both on
+the toolbar and in the View menu. To avoid feedback loops, `_sync_toggle`
+(borrowed from the notebook) sets both widgets while a guard flag
+`_syncing_view_toggles` is raised; every `on_*_toggle_*` handler returns early
+when the guard is up. Each toggle has a single `_set_*` entry point. If you add
+a third surface for these toggles, funnel it through the same `_set_*` method.
+
+**Preview disables Read-only.** `_set_preview` calls
+`btn_readonly.set_sensitive(not preview)` and the same on the menu item, because
+preview is read-only by construction — matching qdvc-markdown-notebook.
+
+## Card view (items pane)
+
+A single `Gtk.CellRendererText` with a `cell-data-func` (`_item_cell_data`)
+paints each row either as a plain title (list view) or, in card view, as three
+lines: bold name, asset tag, and a location-notes snippet. The extra data lives
+in the item `ListStore` columns `ITEM_TAG` and `ITEM_SNIPPET`, filled from
+`Asset.asset_tag()` / `Asset.notes_snippet()` when the folder is selected.
+Toggling the mode just queues a redraw; no store rebuild needed.
+
+## Preferences
+
+`gtk3_preferences.PreferencesDialog` is the view over the Preferences-backed
+settings keys. It snapshots the originals on open, live-applies on every change
+via the `on_apply` callback (`EquipWindow._apply_preferences`, which re-applies
+the toolbar style and re-styles every editor tab), and on Cancel restores the
+snapshot and re-applies. Adding a new preference means: add the key+bounds in
+`settings.py`, a control in the relevant tab here, and an apply step in
+`_apply_preferences`.
 
 ## Editing / saving flow
 
@@ -117,9 +163,9 @@ assert toolbar/menu toggles stay in sync.
 
 ## Known simplifications / good first issues
 
-- **Card view** toolbar toggle currently only updates the status bar; the item
-  list still renders as text rows. Implementing a real `Gtk.FlowBox` card layout
-  for pane 2 is a self-contained task.
+- The editor code-font is applied via a per-tab `Gtk.CssProvider`; the parser
+  in `_parse_font` handles the common "Family Size" form. Exotic Pango
+  descriptions (styles/weights in the string) fall back to family+size only.
 - Preview is rebuilt wholesale on every render; fine for typical asset counts.
 - Renaming/moving assets between folders is not yet exposed in the UI (the core
   has the pieces: `naming.unique_name`, `Workspace.all_names`).

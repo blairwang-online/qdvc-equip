@@ -34,9 +34,10 @@ def main():
     workspace_paths = sys.argv[1:] or None
     win = EquipWindow(workspace_paths=workspace_paths)
     win.show_all()
-    # Respect persisted visibility toggles after show_all().
+    # The window restores persisted toolbar/statusbar visibility itself, after
+    # show_all() would otherwise force everything visible.
     win.toolbar.set_visible(bool(win.settings["show_toolbar"]))
-    win.statusbar.set_visible(bool(win.settings["show_statusbar"]))
+    win.statusbar_box.set_visible(bool(win.settings["show_statusbar"]))
     Gtk.main()
 
 

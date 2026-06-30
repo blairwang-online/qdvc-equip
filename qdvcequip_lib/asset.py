@@ -90,6 +90,30 @@ class Asset(object):
             return []
         return [naming.humanize(p) for p in rel.split(os.sep) if p]
 
+    def asset_tag(self):
+        """Return the asset's tag for card-view display, or ''.
+
+        Looks for an ``info`` row whose label is (case-insensitively) "asset
+        tag" or just "tag"; falls back to the first info value if neither is
+        present. Used as the second line of a card in the items pane.
+        """
+        if not self.info:
+            return ""
+        for key, value in self.info.items():
+            if key.strip().lower() in ("asset tag", "tag"):
+                return value
+        # Fall back to the first info value.
+        return next(iter(self.info.values()), "")
+
+    def notes_snippet(self, max_len=80):
+        """A one-line snippet of location_notes for card-view's third line."""
+        if not self.location_notes:
+            return ""
+        flat = " ".join(self.location_notes.split())
+        if len(flat) > max_len:
+            flat = flat[: max_len - 1].rstrip() + "\u2026"
+        return flat
+
     # ----- (de)serialisation ----------------------------------------------
     def to_dict(self):
         """Return an ordered dict suitable for YAML serialisation."""
