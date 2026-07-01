@@ -70,6 +70,18 @@ mixins hold construction/handler groups and rely on attributes defined on the
 window; each AssetTab is its own object (not a mixin) created via `new_tab`.
 This keeps `gtk3_window.py` focused and mirrors qdvc-markdown-notebook's split.
 
+## Launch behavior & tab shortcuts
+
+Adapted from qdvc-markdown-notebook. In `EquipWindow.__init__`:
+
+- `set_position(Gtk.WindowPosition.CENTER)` centers the window on screen at
+  startup instead of using the WM's default placement.
+- After construction, `set_focus(self.nav_view)` moves initial keyboard focus
+  off the toolbar (the first toolbar button would otherwise show a focus ring
+  on launch) and onto the navigation tree.
+- `key-press-event` is wired to `_on_key_press`, which maps `Alt+1` .. `Alt+9`
+  to `_goto_tab(0..8)` (jump to that notebook page if it exists).
+
 ## Per-tab read-only & preview
 
 Read-only and Preview are stored on each `AssetTab` (`tab.read_only`,
@@ -106,8 +118,11 @@ Built from two nested `Gtk.Paned`. Column index constants live at module top:
 1. **Navigation tree** — `self.nav_view` / `self.nav_store`. Selecting a node
    fills the item list via `_fill_item_list`.
 2. **Items** — `self.item_view` over a `TreeModelFilter` driven by the search
-   entry. Single-click opens the asset in the current tab; double-click /
-   `Enter` opens it in a new tab.
+   entry. `_item_visible_func` matches the query against the row's visible
+   columns AND the asset's full file contents (read via
+   `_asset_contents_lower`, cached per path+mtime), mirroring
+   qdvc-markdown-notebook's name-and-contents search. Single-click opens the
+   asset in the current tab; double-click / `Enter` opens it in a new tab.
 3. **Item details** — `self.notebook`, a `Gtk.Notebook` of tabs. Each tab is an
    `AssetTab` holding both the plaintext `TextView` and (when Preview is on) a
    freshly built preview widget. `_render_tab` swaps between them.

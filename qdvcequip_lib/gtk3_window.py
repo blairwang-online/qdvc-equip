@@ -23,6 +23,7 @@ switching tabs reflects that tab's state back onto the toggles. Activating
 Preview disables the Read-only toggle (preview is read-only by construction).
 """
 
+import io
 import os
 
 import gi
@@ -76,6 +77,9 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, ContextMenuMixin, Gtk.Window):
     def __init__(self, workspace_paths=None):
         super().__init__(title=__app_name__)
         self.set_default_size(1100, 680)
+        # Center on screen at startup (like qdvc-markdown-notebook) rather than
+        # letting the window manager place us in its default corner.
+        self.set_position(Gtk.WindowPosition.CENTER)
 
         self.settings = Settings.load()
         self.workspaces = []            # list[Workspace]
@@ -100,7 +104,13 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, ContextMenuMixin, Gtk.Window):
         if not self.tabs:
             self.new_tab()
         self._rebuild_recent_menu()
+        # Don't let the first toolbar button take initial keyboard focus (it
+        # would show a focus ring on startup otherwise); focus the nav tree
+        # instead, like qdvc-markdown-notebook.
+        self.set_focus(self.nav_view)
         self.connect("destroy", self.on_destroy)
+        # Tab navigation shortcuts (Alt+1 .. Alt+9), like the notebook.
+        self.connect("key-press-event", self._on_key_press)
 
     # ====================================================================
     # UI construction
@@ -220,7 +230,36 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, ContextMenuMixin, Gtk.Window):
             model[it][ITEM_TAG] or "",
             model[it][ITEM_SNIPPET] or "",
         ]).lower()
-        return term in hay
+        if term in hay:
+            return True
+        # Fall back to matching the asset's full file contents (like
+        # qdvc-markdown-notebook), so a search finds text that isn't shown in
+        # the pane-2 list. Reads are cached per path+mtime to keep refiltering
+        # on each keystroke cheap; an unreadable file simply doesn't match here.
+        path = model[it][ITEM_PATH] or ""
+        return term in self._asset_contents_lower(path)
+
+    def _asset_contents_lower(self, path):
+        """Lowercased full file contents for `path`, cached by (path, mtime)."""
+        if not path:
+            return ""
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            return ""
+        cache = getattr(self, "_content_cache", None)
+        if cache is None:
+            cache = self._content_cache = {}
+        cached = cache.get(path)
+        if cached is not None and cached[0] == mtime:
+            return cached[1]
+        try:
+            with io.open(path, "r", encoding="utf-8", errors="replace") as fh:
+                text = fh.read().lower()
+        except OSError:
+            text = ""
+        cache[path] = (mtime, text)
+        return text
 
     def _item_cell_data(self, _col, cell, store, it, _data):
         title = _xml_escape(store[it][ITEM_LABEL])
@@ -457,6 +496,23 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, ContextMenuMixin, Gtk.Window):
 
     def on_filter_changed(self, _entry):
         self.item_filter.refilter()
+
+    def _goto_tab(self, index):
+        """Jump to tab `index` (0-based) if it exists."""
+        if 0 <= index < len(self.tabs):
+            self.notebook.set_current_page(index)
+
+    def _on_key_press(self, _widget, event):
+        """Tab navigation: Alt+1 .. Alt+9 jump to that tab (like the notebook).
+
+        Returns True to stop further handling when we act.
+        """
+        alt = bool(event.state & Gdk.ModifierType.MOD1_MASK)
+        keyval = event.keyval
+        if alt and Gdk.KEY_1 <= keyval <= Gdk.KEY_9:
+            self._goto_tab(keyval - Gdk.KEY_1)
+            return True
+        return False
 
     def on_item_selected(self, selection):
         model, it = selection.get_selected()

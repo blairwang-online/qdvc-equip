@@ -38,6 +38,11 @@ python3 qdvc_equip.py                                          # reopen last ses
 With no arguments it reopens whatever workspaces were open last time; use
 **File → Open workspace** (`Ctrl+O`) to add more.
 
+The window opens centered on screen. Use `Alt+1` .. `Alt+9` to jump to that
+open tab. The pane-2 filter box matches an asset's **name and full file
+contents** (including notes and asset-information values that aren't shown in
+the list), not just the visible list text.
+
 ## Desktop integration (application menu entry)
 
 To make "QDVC Equip" appear in your MATE/GNOME application menu, install a
