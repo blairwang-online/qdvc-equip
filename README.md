@@ -12,6 +12,7 @@ and Atril).
 
 ```yaml
 name: Coffee Machine
+genre: appliances
 emoji: ☕
 location_notes: "You might need to move aside the cartons of UHT milk which may be
   blocking your view of the coffee machine."
@@ -20,6 +21,7 @@ asset_information:
   manufacturer: Coffee Machines Inc.
   model: Cino Grande XL Gen. 2
   serial_number: 689D857D6
+  purchased: 2026-07-01
 ```
 
 Everything except `name` is optional. The asset's **location is not stored** in
@@ -27,6 +29,30 @@ the file — it is derived from the folders the file is nested in. Keys under
 `asset_information` are written in `snake_case` (matching the project naming
 convention) and **humanized for display** in the Preview pane, where their
 values are column-aligned and each gets a `[copy]` button.
+
+The optional top-level `genre` groups an asset under one of the built-in
+genres (see below). Unlike everything else, a genre is shown **verbatim** —
+never humanized (`laptop-docks`, not "Laptop Docks"). A `purchased` date
+(`YYYY-MM-DD`) is rendered in Preview as a friendly date plus the asset's age,
+e.g. `Wed 01 Jul 2026 (52d)` under a year old, or `Fri 14 Oct 2022 (3.7y)`
+beyond it.
+
+## Genres
+
+An asset may set `genre:` to one of the built-in genres, each mapped to a
+system icon shown for that asset in the item list (pane 2): `appliances`,
+`audio`, `baby`, `cables`, `chargers`, `components`, `displays`,
+`electronics`, `hdd`, `infrastructure`, `lights`, `keyboards`, `laptop-docks`,
+`laptops`, `printers`, `psu`, `smartphones`, `ssd`, `wearables`. The icons come
+from the host Linux icon theme; you can override any genre's icon with your own
+image under **Edit → Preferences → Genres**, which also lists which genres
+currently have custom icons and offers a one-click reset.
+
+The navigation tree (pane 1) has, in order: **All Assets**; **Asset Tags**
+(expanding to *Tagged* / *Not Tagged*, filtering pane 2 by whether an
+`asset_tag` is present); **Genres** (each built-in genre plus *(no genre)*,
+filtering pane 2 to that genre); and **Workspaces**, under which every open
+workspace and its folder tree is nested.
 
 ## Usage
 

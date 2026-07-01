@@ -12,6 +12,8 @@ Stored keys:
     code_font: Pango font description for the YAML/plaintext editor.
     editor_line_spacing: extra pixels of inter-line spacing in the editor.
     toolbar_style: "beside" or "below" — toolbar icon text placement.
+    genre_icons: mapping of genre name -> absolute path to a custom icon image
+        that overrides the built-in freedesktop icon for that genre.
 
 The font / spacing / toolbar-style keys back the Edit -> Preferences dialog
 (see gtk3_preferences.py). They are defined here, in the GTK-free core, so the
@@ -52,6 +54,7 @@ _DEFAULTS = {
     "code_font": DEFAULT_CODE_FONT,
     "editor_line_spacing": DEFAULT_EDITOR_LINE_SPACING,
     "toolbar_style": DEFAULT_TOOLBAR_STYLE,
+    "genre_icons": {},
 }
 
 
@@ -86,6 +89,14 @@ class Settings(object):
             TOOLBAR_TEXT_BESIDE, TOOLBAR_TEXT_BELOW
         ):
             self._data["toolbar_style"] = DEFAULT_TOOLBAR_STYLE
+        # genre_icons must be a {genre: path} mapping of strings.
+        gi = self._data.get("genre_icons")
+        if isinstance(gi, dict):
+            self._data["genre_icons"] = {
+                str(k): str(v) for k, v in gi.items() if v
+            }
+        else:
+            self._data["genre_icons"] = {}
 
     # dict-ish access
     def __getitem__(self, key):
@@ -122,6 +133,42 @@ class Settings(object):
     def set_toolbar_style(self, value):
         if value in (TOOLBAR_TEXT_BESIDE, TOOLBAR_TEXT_BELOW):
             self._data["toolbar_style"] = value
+
+    # ----- custom genre icons ---------------------------------------------
+    @property
+    def genre_icons(self):
+        """The {genre: custom-icon-path} mapping (may be empty)."""
+        return dict(self._data.get("genre_icons") or {})
+
+    def genre_icon(self, genre):
+        """Return the custom icon path set for *genre*, or '' if none."""
+        return (self._data.get("genre_icons") or {}).get(genre, "")
+
+    def set_genre_icon(self, genre, path):
+        """Set (or, with a falsy *path*, clear) the custom icon for *genre*."""
+        icons = dict(self._data.get("genre_icons") or {})
+        if path:
+            icons[genre] = str(path)
+        else:
+            icons.pop(genre, None)
+        self._data["genre_icons"] = icons
+
+    def clear_genre_icons(self):
+        """Remove all custom genre icons."""
+        self._data["genre_icons"] = {}
+
+    def set_genre_icons(self, mapping):
+        """Replace the whole {genre: path} mapping (used for Cancel-revert)."""
+        if isinstance(mapping, dict):
+            self._data["genre_icons"] = {
+                str(k): str(v) for k, v in mapping.items() if v
+            }
+        else:
+            self._data["genre_icons"] = {}
+
+    def genres_with_custom_icons(self):
+        """Sorted list of genres that currently have a custom icon set."""
+        return sorted((self._data.get("genre_icons") or {}).keys())
 
     # ----- recent / open workspace bookkeeping ----------------------------
     def note_opened(self, path):

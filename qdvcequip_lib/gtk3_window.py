@@ -30,13 +30,14 @@ import gi
 
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
-from gi.repository import Gtk, Gdk, GLib, Pango  # noqa: E402
+from gi.repository import Gtk, Gdk, GLib, Pango, GdkPixbuf  # noqa: E402
 
 from . import __version__, __app_name__
 from .workspace import Workspace
 from .settings import Settings
 from .asset import Asset
 from . import naming
+from . import genre as genre_mod
 from .gtk3_preview import build_preview
 from .gtk3_menubar import MenuBarMixin
 from .gtk3_toolbar import ToolbarMixin
@@ -49,10 +50,21 @@ NAV_LABEL, NAV_KIND, NAV_PATH, NAV_WS_ROOT = range(4)
 KIND_ALL = "all_assets"
 KIND_WORKSPACE = "workspace"
 KIND_FOLDER = "folder"
+# Grouping rows and their filter children (added after All Assets).
+KIND_TAGS_ROOT = "tags_root"          # "Asset Tags" parent
+KIND_TAGGED = "tagged"                # assets that HAVE an asset_tag
+KIND_UNTAGGED = "untagged"            # assets WITHOUT an asset_tag
+KIND_GENRE_ROOT = "genre_root"        # "Genres" parent
+KIND_GENRE = "genre"                  # one built-in genre (NAV_PATH = name)
+KIND_WORKSPACES_ROOT = "workspaces"   # "Workspaces" parent holding all open ws
+# Sentinel stored in NAV_PATH for the "(no genre)" filter row. It must not be
+# storable-clobbered (no NUL bytes — GTK string columns are NUL-terminated) and
+# must never collide with a real genre (which are lowercase [a-z0-9-]).
+NO_GENRE_SENTINEL = "__no_genre__"
 
 # Item list column indices: label, path, ws_root, tag (card line 2),
-# notes snippet (card line 3).
-ITEM_LABEL, ITEM_PATH, ITEM_WS_ROOT, ITEM_TAG, ITEM_SNIPPET = range(5)
+# notes snippet (card line 3), genre (drives the row icon).
+ITEM_LABEL, ITEM_PATH, ITEM_WS_ROOT, ITEM_TAG, ITEM_SNIPPET, ITEM_GENRE = range(6)
 
 
 def _xml_escape(text):
@@ -167,21 +179,115 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, ContextMenuMixin, Gtk.Window):
         self.nav_view.get_selection().connect("changed", self.on_nav_selected)
         sw.add(self.nav_view)
         frame.add(sw)
-        self._add_all_assets_row()
+        self._build_static_nav_rows()
         return frame
 
-    def _add_all_assets_row(self):
-        # The "All Assets" virtual node sits at the very top (mirrors the
-        # notebook's "All Notes").
+    def _build_static_nav_rows(self):
+        """Append the fixed top-level nav rows in order.
+
+        All Assets, then the Asset Tags group (Tagged / Not Tagged), the Genres
+        group (each built-in genre plus a trailing "(no genre)"), and finally
+        the Workspaces group that all open workspaces nest under. Returns after
+        recording iters for the group parents so workspaces can be added later.
+        """
+        # All Assets — the virtual "everything" node (mirrors "All Notes").
+        self.nav_store.append(None, ["All Assets", KIND_ALL, "", ""])
+
+        # Asset Tags group.
+        tags_iter = self.nav_store.append(
+            None, ["Asset Tags", KIND_TAGS_ROOT, "", ""])
+        self.nav_store.append(tags_iter, ["Tagged", KIND_TAGGED, "", ""])
+        self.nav_store.append(tags_iter, ["Not Tagged", KIND_UNTAGGED, "", ""])
+
+        # Genres group — one row per built-in genre, verbatim (never humanized),
+        # then a trailing "(no genre)" filter row.
+        genre_iter = self.nav_store.append(
+            None, ["Genres", KIND_GENRE_ROOT, "", ""])
+        for g in genre_mod.all_genres():
+            self.nav_store.append(genre_iter, [g, KIND_GENRE, g, ""])
         self.nav_store.append(
-            None, ["All Assets", KIND_ALL, "", ""])
+            genre_iter, ["(no genre)", KIND_GENRE, NO_GENRE_SENTINEL, ""])
+
+        # Workspaces group — open workspaces are nested under this parent.
+        self._workspaces_iter = self.nav_store.append(
+            None, ["Workspaces", KIND_WORKSPACES_ROOT, "", ""])
 
     def _nav_icon_func(self, _col, cell, model, it, _data):
         kind = model[it][NAV_KIND]
+        if kind == KIND_GENRE:
+            # A genre row shows its (custom or built-in) icon; "(no genre)"
+            # uses a neutral icon.
+            val = model[it][NAV_PATH]
+            if val == NO_GENRE_SENTINEL:
+                cell.set_property("icon-name", "edit-clear")
+                cell.set_property("pixbuf", None)
+                return
+            self._apply_genre_icon(cell, val)
+            return
+        cell.set_property("pixbuf", None)
         cell.set_property("icon-name", {
             KIND_ALL: "emblem-documents",
-            KIND_WORKSPACE: "drive-harddisk",
+            KIND_TAGS_ROOT: "emblem-symbolic-link",
+            KIND_TAGGED: "emblem-default",
+            KIND_UNTAGGED: "important",
+            KIND_GENRE_ROOT: "emblem-photos",
+            KIND_WORKSPACES_ROOT: "emblem-generic",
+            KIND_WORKSPACE: "applications-other",
         }.get(kind, "folder"))
+
+    def _apply_genre_icon(self, cell, genre_value):
+        """Set *cell* to *genre_value*'s icon: custom image if set, else stock.
+
+        A custom icon (an image file chosen in Preferences) is loaded and
+        scaled to a small pixbuf; the built-in freedesktop icon is applied by
+        name. Unknown genres get the generic package icon so rows never blank
+        out. Pixbufs are cached by (path, mtime).
+        """
+        custom = self.settings.genre_icon(genre_value)
+        if custom:
+            pb = self._custom_icon_pixbuf(custom)
+            if pb is not None:
+                cell.set_property("pixbuf", pb)
+                return
+        cell.set_property("pixbuf", None)
+        name = genre_mod.icon_name(genre_value) or "package-x-generic"
+        cell.set_property("icon-name", name)
+
+    def _custom_icon_pixbuf(self, path, size=16):
+        """Return a scaled GdkPixbuf for *path*, cached by (path, mtime).
+
+        Returns None if the file is missing or can't be decoded, so callers
+        fall back to the stock icon.
+        """
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            return None
+        cache = getattr(self, "_icon_pixbuf_cache", None)
+        if cache is None:
+            cache = self._icon_pixbuf_cache = {}
+        key = (path, size)
+        cached = cache.get(key)
+        if cached is not None and cached[0] == mtime:
+            return cached[1]
+        try:
+            pb = GdkPixbuf.Pixbuf.new_from_file_at_size(path, size, size)
+        except Exception:
+            pb = None
+        cache[key] = (mtime, pb)
+        return pb
+
+    def _invalidate_icon_caches(self):
+        """Drop the custom-icon pixbuf cache and redraw both icon-bearing views.
+
+        Called after Preferences changes a custom genre icon, so the nav tree
+        and items pane repaint with the new (or reset) icons.
+        """
+        self._icon_pixbuf_cache = {}
+        if getattr(self, "nav_view", None) is not None:
+            self.nav_view.queue_draw()
+        if getattr(self, "item_view", None) is not None:
+            self.item_view.queue_draw()
 
     # ----- pane 2: item list -----------------------------------------------
     def _build_item_pane(self):
@@ -194,17 +300,17 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, ContextMenuMixin, Gtk.Window):
 
         sw = Gtk.ScrolledWindow()
         sw.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        # label, path, ws_root, tag, snippet
-        self.item_store = Gtk.ListStore(str, str, str, str, str)
+        # label, path, ws_root, tag, snippet, genre
+        self.item_store = Gtk.ListStore(str, str, str, str, str, str)
         self.item_filter = self.item_store.filter_new()
         self.item_filter.set_visible_func(self._item_visible_func)
         self.item_view = Gtk.TreeView(model=self.item_filter)
         self.item_view.set_headers_visible(False)
 
         col = Gtk.TreeViewColumn("Asset")
-        icon = Gtk.CellRendererPixbuf()
-        icon.set_property("icon-name", "package-x-generic")
-        col.pack_start(icon, False)
+        self._item_icon_renderer = Gtk.CellRendererPixbuf()
+        col.pack_start(self._item_icon_renderer, False)
+        col.set_cell_data_func(self._item_icon_renderer, self._item_icon_data)
         self._item_text_renderer = Gtk.CellRendererText()
         self._item_text_renderer.set_property(
             "ellipsize", Pango.EllipsizeMode.END)
@@ -261,6 +367,19 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, ContextMenuMixin, Gtk.Window):
         cache[path] = (mtime, text)
         return text
 
+    def _item_icon_data(self, _col, cell, store, it, _data):
+        """Paint each item row's icon from its genre (custom or built-in).
+
+        A genreless asset (or one whose genre isn't a built-in) shows the
+        generic package icon, matching the previous fixed behavior.
+        """
+        g = store[it][ITEM_GENRE] or ""
+        if g and genre_mod.is_genre(g):
+            self._apply_genre_icon(cell, g)
+        else:
+            cell.set_property("pixbuf", None)
+            cell.set_property("icon-name", "package-x-generic")
+
     def _item_cell_data(self, _col, cell, store, it, _data):
         title = _xml_escape(store[it][ITEM_LABEL])
         if not self.card_view:
@@ -307,8 +426,11 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, ContextMenuMixin, Gtk.Window):
 
     def _add_workspace_to_nav(self, ws):
         ws_iter = self.nav_store.append(
-            None, [ws.display_name, KIND_WORKSPACE, ws.root, ws.root])
+            self._workspaces_iter,
+            [ws.display_name, KIND_WORKSPACE, ws.root, ws.root])
         self._populate_folder_children(ws_iter, ws.root_node, ws.root)
+        self.nav_view.expand_row(
+            self.nav_store.get_path(self._workspaces_iter), False)
         self.nav_view.expand_row(self.nav_store.get_path(ws_iter), False)
 
     def _populate_folder_children(self, parent_iter, node, ws_root):
@@ -326,7 +448,7 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, ContextMenuMixin, Gtk.Window):
 
     def refresh_workspaces(self):
         self.nav_store.clear()
-        self._add_all_assets_row()
+        self._build_static_nav_rows()
         for ws in self.workspaces:
             ws.refresh()
             self._add_workspace_to_nav(ws)
@@ -456,19 +578,45 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, ContextMenuMixin, Gtk.Window):
         if kind == KIND_ALL:
             self._fill_item_list_all()
             return
+        if kind in (KIND_TAGS_ROOT, KIND_GENRE_ROOT, KIND_WORKSPACES_ROOT):
+            # Grouping parents don't themselves list assets; just expand.
+            self.nav_view.expand_row(model.get_path(it), False)
+            self.item_store.clear()
+            self.set_status("Select an item under \u201c%s\u201d"
+                            % model[it][NAV_LABEL])
+            return
+        if kind == KIND_TAGGED:
+            self._fill_item_list_filtered(
+                lambda a: a.has_tag(), "tagged")
+            return
+        if kind == KIND_UNTAGGED:
+            self._fill_item_list_filtered(
+                lambda a: not a.has_tag(), "untagged")
+            return
+        if kind == KIND_GENRE:
+            g = model[it][NAV_PATH]
+            if g == NO_GENRE_SENTINEL:
+                self._fill_item_list_filtered(
+                    lambda a: not a.genre, "with no genre")
+            else:
+                self._fill_item_list_filtered(
+                    lambda a, gg=g: a.genre == gg, "in genre %s" % g)
+            return
         self._fill_item_list(model[it][NAV_PATH], model[it][NAV_WS_ROOT])
 
     def _append_item_row(self, ws, asset_path, ws_root):
         stem = os.path.splitext(os.path.basename(asset_path))[0]
-        tag, snippet = "", ""
+        tag, snippet, asset_genre = "", "", ""
         try:
             a = ws.load_asset(asset_path)
             tag = a.asset_tag()
             snippet = a.notes_snippet()
+            asset_genre = a.genre
         except Exception:
             pass
         self.item_store.append(
-            [naming.humanize(stem), asset_path, ws_root, tag, snippet])
+            [naming.humanize(stem), asset_path, ws_root, tag, snippet,
+             asset_genre])
 
     def _fill_item_list(self, folder_path, ws_root):
         self.item_store.clear()
@@ -493,6 +641,30 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, ContextMenuMixin, Gtk.Window):
                 total += 1
         self.set_status("%d asset%s across all workspaces"
                         % (total, "" if total == 1 else "s"))
+
+    def _fill_item_list_filtered(self, predicate, descriptor):
+        """List every asset (all workspaces) for which *predicate(asset)* holds.
+
+        Used by the Asset Tags (Tagged / Not Tagged) and Genres nav filters.
+        *descriptor* is a short phrase for the status bar.
+        """
+        self.item_store.clear()
+        total = 0
+        for ws in self.workspaces:
+            for asset_path in ws.all_asset_files():
+                try:
+                    a = ws.load_asset(asset_path)
+                except Exception:
+                    continue
+                if not predicate(a):
+                    continue
+                stem = os.path.splitext(os.path.basename(asset_path))[0]
+                self.item_store.append([
+                    naming.humanize(stem), asset_path, ws.root,
+                    a.asset_tag(), a.notes_snippet(), a.genre])
+                total += 1
+        self.set_status("%d asset%s %s"
+                        % (total, "" if total == 1 else "s", descriptor))
 
     def on_filter_changed(self, _entry):
         self.item_filter.refilter()
@@ -590,7 +762,7 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, ContextMenuMixin, Gtk.Window):
 
     def on_new_asset(self, *_):
         model, it = self.nav_view.get_selection().get_selected()
-        if it is None or model[it][NAV_KIND] in (KIND_ALL,):
+        if it is None or model[it][NAV_KIND] not in (KIND_WORKSPACE, KIND_FOLDER):
             self.set_status("Select a workspace or folder first.")
             return
         folder_path = model[it][NAV_PATH]
@@ -663,7 +835,7 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, ContextMenuMixin, Gtk.Window):
 
     def on_new_folder(self, *_):
         model, it = self.nav_view.get_selection().get_selected()
-        if it is None or model[it][NAV_KIND] == KIND_ALL:
+        if it is None or model[it][NAV_KIND] not in (KIND_WORKSPACE, KIND_FOLDER):
             self.set_status("Select a workspace or folder first.")
             return
         parent_path = model[it][NAV_PATH]
@@ -693,6 +865,8 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, ContextMenuMixin, Gtk.Window):
     def _apply_preferences(self):
         self._apply_toolbar_style()
         self._apply_editor_style_all()
+        # Custom genre icons may have changed; repaint the icon-bearing views.
+        self._invalidate_icon_caches()
 
     def on_toggle_toolbar(self, item):
         self.settings["show_toolbar"] = item.get_active()

@@ -6,6 +6,8 @@ read-only card built from real GTK widgets (labels, sections, and per-row
 preview, but instead of rich text it produces a structured equipment card:
 
     ☕ Coffee Machine             <- large heading (emoji + name)
+    Genre                        <- only shown when a genre is set
+        appliances               (verbatim — never humanized)
     Location
         Home --> Kitchen --> Pantry
     Location Notes               <- only shown when notes are present
@@ -16,18 +18,24 @@ preview, but instead of rich text it produces a structured equipment card:
         Model:         Cino Grande XL Gen. 2   [copy]
         Serial Number: 689D857D6               [copy]
 
-Asset-information labels are humanized from their snake_case YAML keys (see
-Asset.info_display_items). Their *values* are column-aligned with one another,
-following the GNOME2/MATE/GTK convention — achieved with a Gtk.Grid (label in
-column 0, value in column 1, copy button in column 2) plus a SizeGroup so the
-label column is exactly as wide as its widest label. Each [copy] button puts
-that row's value on the clipboard.
+Asset-information labels are humanized from their snake_case YAML keys. Their
+*values* are column-aligned with one another, following the GNOME2/MATE/GTK
+convention — achieved with a Gtk.Grid (label in column 0, value in column 1,
+copy button in column 2) plus a SizeGroup so the label column is exactly as
+wide as its widest label. Each [copy] button puts that row's value on the
+clipboard. The ``purchased`` row is special-cased: its ISO date is shown as a
+friendly date plus the asset's age (e.g. ``Wed 01 Jul 2026 (52d)``) while the
+copy button still copies the raw value (see ``qdvcequip_lib.dates``).
 """
 
 import gi
 
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Gdk, Pango  # noqa: E402
+
+from . import naming
+from . import dates
+from . import genre as genre_mod
 
 # How far section bodies are indented from the left edge (the rendered spec
 # shows the body indented under each section title).
@@ -53,6 +61,11 @@ def build_preview(asset, workspace_display_name=""):
     heading.set_line_wrap(True)
     box.pack_start(heading, False, False, 0)
 
+    # --- Genre (optional; shown verbatim, never humanized) ----------------
+    if asset.genre:
+        _add_section_title(box, "Genre")
+        _add_indented_line(box, asset.genre)
+
     # --- Location section --------------------------------------------------
     crumbs = []
     if workspace_display_name:
@@ -69,7 +82,19 @@ def build_preview(asset, workspace_display_name=""):
         _add_indented_line(box, asset.location_notes.strip(), wrap=True)
 
     # --- Asset information (value-aligned, copyable rows) -----------------
-    rows = list(asset.info_display_items())
+    # Build (label, display_value, copy_value) triples from the raw snake_case
+    # keys so we can special-case `purchased` (shown as a friendly date plus
+    # the asset's age) while still copying the underlying ISO value.
+    rows = []
+    for key, value in asset.info.items():
+        label = naming.humanize(key)
+        display = value
+        copy_value = value
+        if key.strip().lower() == "purchased":
+            formatted = dates.format_purchased(value)
+            if formatted:
+                display = formatted
+        rows.append((label, display, copy_value))
     if rows:
         _add_section_title(box, "Asset Information")
 
@@ -81,7 +106,7 @@ def build_preview(asset, workspace_display_name=""):
         # the widest one, so the value column lines up across all rows.
         label_group = Gtk.SizeGroup(Gtk.SizeGroupMode.HORIZONTAL)
 
-        for r, (label, value) in enumerate(rows):
+        for r, (label, value, copy_value) in enumerate(rows):
             lbl = Gtk.Label(xalign=0.0)
             lbl.set_markup("<b>%s:</b>" % _escape(label))
             label_group.add_widget(lbl)
@@ -95,9 +120,10 @@ def build_preview(asset, workspace_display_name=""):
             grid.attach(val, 1, r, 1, 1)
 
             copy_btn = Gtk.Button(label="copy")
-            copy_btn.set_tooltip_text("Copy \u201c%s\u201d to clipboard" % value)
+            copy_btn.set_tooltip_text(
+                "Copy \u201c%s\u201d to clipboard" % copy_value)
             copy_btn.set_valign(Gtk.Align.CENTER)
-            copy_btn.connect("clicked", _on_copy_clicked, value)
+            copy_btn.connect("clicked", _on_copy_clicked, copy_value)
             grid.attach(copy_btn, 2, r, 1, 1)
 
         box.pack_start(grid, False, False, 0)

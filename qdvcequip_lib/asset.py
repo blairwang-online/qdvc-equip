@@ -8,6 +8,7 @@ derived from the filesystem rather than stored in the YAML.
 The YAML body holds the descriptive fields the Preview pane renders:
 
     name: Coffee Machine
+    genre: appliances
     emoji: ☕
     location_notes: "You might need to move aside the cartons of UHT milk which
       may be blocking your view of the coffee machine."
@@ -22,7 +23,8 @@ snake_case (``asset_tag``, ``serial_number``) to match the project's naming
 convention, but are *humanized* for display in the Preview pane ("Asset Tag",
 "Serial Number"). Each becomes a value-aligned row with a [copy] button.
 Everything except ``name`` is optional — a brand new asset is simply ``name``
-derived from its filename.
+derived from its filename. The optional top-level ``genre`` key (see
+``qdvcequip_lib.genre``) is stored and shown *verbatim* — never humanized.
 
 This module degrades gracefully without PyYAML: it can still read and write a
 small, predictable subset of YAML so the application runs on a bare install.
@@ -40,6 +42,7 @@ except Exception:  # pragma: no cover - exercised only on bare installs.
     _HAVE_YAML = False
 
 from . import naming
+from . import genre as genre_mod
 
 # The YAML key holding the asset-information mapping.
 INFO_KEY = "asset_information"
@@ -53,6 +56,8 @@ class Asset(object):
         workspace_root: absolute path to the owning workspace folder.
         name:           display name (defaults to humanized filename stem).
         emoji:          a short glyph shown before the name in Preview.
+        genre:          optional built-in genre (verbatim, never humanized);
+                        drives the asset's icon in the items pane. '' if unset.
         location_notes: free text describing where/how to find it.
         info:           OrderedDict of snake_case_key -> value rows (the
                         ``asset_information`` mapping). Keys are humanized only
@@ -64,6 +69,7 @@ class Asset(object):
         self.workspace_root = workspace_root
         self.name = ""
         self.emoji = ""
+        self.genre = ""
         self.location_notes = ""
         self.info = OrderedDict()
         # Raw text last loaded/saved; lets the plaintext view round-trip
@@ -111,6 +117,20 @@ class Asset(object):
                 return value
         return next(iter(self.info.values()), "")
 
+    def has_tag(self):
+        """True if the asset carries a non-empty ``asset_tag`` in its info.
+
+        Distinct from :meth:`asset_tag`, which falls back to the first info
+        value; this checks specifically for an ``asset_tag`` / ``tag`` key with
+        a non-empty value, and is what the Asset Tags nav filters use.
+        """
+        if not self.info:
+            return False
+        for key, value in self.info.items():
+            if key.strip().lower() in ("asset_tag", "tag"):
+                return bool(str(value).strip())
+        return False
+
     def info_display_items(self):
         """Yield (humanized_label, value) pairs for the Preview pane.
 
@@ -134,6 +154,8 @@ class Asset(object):
         """Return an ordered dict suitable for YAML serialisation."""
         d = OrderedDict()
         d["name"] = self.name
+        if self.genre:
+            d["genre"] = self.genre
         if self.emoji:
             d["emoji"] = self.emoji
         if self.location_notes:
@@ -162,6 +184,7 @@ class Asset(object):
             data = {}
         asset.name = str(data.get("name") or "").strip()
         asset.emoji = str(data.get("emoji") or "").strip()
+        asset.genre = genre_mod.normalize(data.get("genre"))
         asset.location_notes = str(data.get("location_notes") or "").rstrip()
         # Prefer the canonical `asset_information` key; tolerate the older
         # `info` key for backward compatibility with early files.
@@ -212,6 +235,7 @@ class Asset(object):
         )
         self.name = updated.name
         self.emoji = updated.emoji
+        self.genre = updated.genre
         self.location_notes = updated.location_notes
         self.info = updated.info
         self._raw_text = text

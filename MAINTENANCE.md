@@ -31,14 +31,22 @@ qdvcequip_lib/
                            asset-information mapping is the `asset_information`
                            YAML key with snake_case sub-keys; info_display_items()
                            humanizes them for the Preview pane. asset_tag() /
-                           notes_snippet() supply the card-view sub-lines.
-                           Includes a no-PyYAML fallback dumper/loader.
+                           notes_snippet() supply the card-view sub-lines;
+                           has_tag() backs the Asset Tags nav filters. The
+                           optional top-level `genre` key is stored/shown
+                           verbatim. Includes a no-PyYAML fallback dumper/loader.
+  genre.py         (core)  The built-in genres and their default freedesktop
+                           icons (GENRE_ICONS). icon_name() strips the category
+                           for GTK lookup; genres are never humanized.
+  dates.py         (core)  Purchase-date parsing + friendly formatting and age
+                           ("Wed 01 Jul 2026 (52d)" / "(3.7y)"). Pure/testable.
   workspace.py     (core)  Workspace + FolderNode tree. Scans the filesystem,
                            enforces workspace-wide name uniqueness, computes
                            new asset/folder paths.
   settings.py      (core)  Persisted settings + recent/open workspace list.
                            Also defines the Preferences-backed keys (code_font,
-                           editor_line_spacing, toolbar_style) with bounds.
+                           editor_line_spacing, toolbar_style) with bounds, and
+                           the genre_icons map (genre -> custom icon path).
   gtk3_menubar.py  (view)  MenuBarMixin: File/Edit/View/Help menus (icons on
                            items). New tab sits just before Close tab. Exposes
                            _icon_menu_item, reused by the context menus.
@@ -54,10 +62,13 @@ qdvcequip_lib/
                            EventBox for right-click, close button), and its
                            per-tab read_only / preview / dirty state.
   gtk3_preferences.py (view) PreferencesDialog: Edit -> Preferences (Fonts +
-                           Interface) with live preview and Save/Cancel-revert.
-  gtk3_preview.py  (view)  Builds the read-only Preview card: humanized,
-                           value-aligned asset-information rows (Gtk.Grid +
-                           SizeGroup) with per-row [copy] buttons.
+                           Interface + Genres) with live preview and
+                           Save/Cancel-revert.
+  gtk3_preview.py  (view)  Builds the read-only Preview card: optional Genre
+                           section (verbatim), humanized value-aligned
+                           asset-information rows (Gtk.Grid + SizeGroup) with
+                           per-row [copy] buttons, and the `purchased` date+age
+                           special-case.
   gtk3_window.py   (view)  EquipWindow: layout, the three panes, the details
                            notebook, the status bar, and action handlers.
                            Composes the four mixins above.
@@ -115,14 +126,17 @@ previewing, driven by `AssetTab.refresh_status_icons()` (the icons use
 Built from two nested `Gtk.Paned`. Column index constants live at module top:
 `NAV_*` for the navigation `TreeStore`, `ITEM_*` for the item `ListStore`.
 
-1. **Navigation tree** — `self.nav_view` / `self.nav_store`. Selecting a node
-   fills the item list via `_fill_item_list`.
+1. **Navigation tree** — `self.nav_view` / `self.nav_store`. Fixed grouping
+   rows (All Assets, Asset Tags, Genres, Workspaces) plus workspaces nested
+   under the last; selecting a node fills the item list. See the fuller
+   "Navigation tree (pane 1)" section below.
 2. **Items** — `self.item_view` over a `TreeModelFilter` driven by the search
-   entry. `_item_visible_func` matches the query against the row's visible
-   columns AND the asset's full file contents (read via
-   `_asset_contents_lower`, cached per path+mtime), mirroring
-   qdvc-markdown-notebook's name-and-contents search. Single-click opens the
-   asset in the current tab; double-click / `Enter` opens it in a new tab.
+   entry. Each row's icon (`_item_icon_data`) reflects its genre. The
+   `_item_visible_func` matches the query against the row's visible columns AND
+   the asset's full file contents (read via `_asset_contents_lower`, cached per
+   path+mtime), mirroring qdvc-markdown-notebook's name-and-contents search.
+   Single-click opens the asset in the current tab; double-click / `Enter`
+   opens it in a new tab.
 3. **Item details** — `self.notebook`, a `Gtk.Notebook` of tabs. Each tab is an
    `AssetTab` holding both the plaintext `TextView` and (when Preview is on) a
    freshly built preview widget. `_render_tab` swaps between them.
@@ -142,13 +156,48 @@ preview is read-only by construction — matching qdvc-markdown-notebook.
 
 ## Navigation tree (pane 1)
 
-Built as a `Gtk.TreeStore` with columns `[label, kind, path, ws_root]`. Row
-kinds: `KIND_ALL` (the "All Assets" virtual row, always first, re-added by
-`refresh_workspaces`), `KIND_WORKSPACE` (one per open workspace), and
-`KIND_FOLDER` (nested arbitrarily deep). Selecting All Assets calls
-`_fill_item_list_all` (every asset in every workspace); selecting a workspace
-or folder calls `_fill_item_list`. There is no mapping between folder depth and
-real-world ontology — the tree just mirrors the filesystem.
+Built as a `Gtk.TreeStore` with columns `[label, kind, path, ws_root]`. The
+fixed top-level rows are laid down by `_build_static_nav_rows` (also re-run by
+`refresh_workspaces`), in order:
+
+- `KIND_ALL` — the "All Assets" virtual row. Selecting it calls
+  `_fill_item_list_all` (every asset in every workspace).
+- `KIND_TAGS_ROOT` — the "Asset Tags" group parent, holding `KIND_TAGGED` and
+  `KIND_UNTAGGED`. These call `_fill_item_list_filtered` with `Asset.has_tag()`
+  (or its negation) across all workspaces.
+- `KIND_GENRE_ROOT` — the "Genres" group parent, holding one `KIND_GENRE` row
+  per built-in genre (from `genre.all_genres()`, label == name, shown verbatim)
+  plus a trailing "(no genre)" row whose `NAV_PATH` is `NO_GENRE_SENTINEL`.
+  Selecting a genre filters to `asset.genre == <name>`; "(no genre)" filters to
+  assets with no genre. `NO_GENRE_SENTINEL` must be free of NUL bytes (GTK
+  string columns are NUL-terminated) and can't collide with a real genre.
+- `KIND_WORKSPACES_ROOT` — the "Workspaces" group parent. Every open workspace
+  (`KIND_WORKSPACE`) is nested **under** this row (via `self._workspaces_iter`),
+  each expanding its full `KIND_FOLDER` hierarchy. Selecting a workspace/folder
+  calls `_fill_item_list`.
+
+Selecting a group *parent* (`KIND_TAGS_ROOT` / `KIND_GENRE_ROOT` /
+`KIND_WORKSPACES_ROOT`) lists nothing — it just expands and prompts. Row icons
+come from `_nav_icon_func`: workspace = `applications-other`, Workspaces parent
+= `emblem-generic`, Tagged = `emblem-default`, Not Tagged = `important`, and a
+`KIND_GENRE` row shows its genre icon (custom or built-in) via
+`_apply_genre_icon`. There is no mapping between folder depth and real-world
+ontology — the tree just mirrors the filesystem.
+
+Note the two "new" actions (`on_new_asset`, `on_new_folder`) require a real
+folder path, so they proceed only for `KIND_WORKSPACE`/`KIND_FOLDER` rows.
+
+## Genre icons
+
+`genre.py` is the single source of truth: `GENRE_ICONS` maps each built-in
+genre to a `category/icon-name` default; `icon_name()` returns the bare name
+GTK's icon theme wants. A user override lives in `settings.genre_icons`
+(`genre -> absolute image path`). `EquipWindow._apply_genre_icon` applies the
+override (loaded + scaled by `_custom_icon_pixbuf`, cached by path+mtime) or
+falls back to the stock named icon; it drives both the pane-1 genre rows and
+the pane-2 item icons (`_item_icon_data`). After Preferences changes an icon,
+`_apply_preferences` calls `_invalidate_icon_caches` to drop the pixbuf cache
+and redraw both views.
 
 ## Context menus
 
@@ -166,27 +215,38 @@ lists `(workspace root)` plus a humanized breadcrumb for every folder via
 `gtk3_preview.build_preview` lays asset-information rows in a 3-column
 `Gtk.Grid` (label, value, copy button). A horizontal `Gtk.SizeGroup` over the
 label cells forces them all to the width of the widest label, so the value
-column aligns — the GNOME/MATE convention. Labels come humanized from
-`Asset.info_display_items()`; the snake_case keys never appear in the UI.
+column aligns — the GNOME/MATE convention. Labels are humanized from the
+snake_case keys here in the builder (iterating `asset.info` directly so the raw
+key is retained); the snake_case keys never appear in the UI. Two special
+cases: an optional **Genre** section is rendered above Location (verbatim,
+never humanized), and the `purchased` row shows `dates.format_purchased(value)`
+(friendly date + age) while its [copy] button still copies the raw ISO value.
 
 ## Card view (items pane)
 
-A single `Gtk.CellRendererText` with a `cell-data-func` (`_item_cell_data`)
-paints each row either as a plain title (list view) or, in card view, as three
-lines: bold name, asset tag, and a location-notes snippet. The extra data lives
-in the item `ListStore` columns `ITEM_TAG` and `ITEM_SNIPPET`, filled from
-`Asset.asset_tag()` / `Asset.notes_snippet()` when the folder is selected.
-Toggling the mode just queues a redraw; no store rebuild needed.
+Two cell renderers share the pane-2 column: a `Gtk.CellRendererPixbuf` driven
+by `_item_icon_data` (the genre icon, or `package-x-generic` when genreless),
+and a `Gtk.CellRendererText` with `_item_cell_data` that paints each row either
+as a plain title (list view) or, in card view, as three lines: bold name, asset
+tag, and a location-notes snippet. The extra data lives in the item `ListStore`
+columns `ITEM_TAG`, `ITEM_SNIPPET`, and `ITEM_GENRE`, filled from
+`Asset.asset_tag()` / `Asset.notes_snippet()` / `Asset.genre`. Toggling card
+view just queues a redraw; no store rebuild needed.
 
 ## Preferences
 
 `gtk3_preferences.PreferencesDialog` is the view over the Preferences-backed
-settings keys. It snapshots the originals on open, live-applies on every change
-via the `on_apply` callback (`EquipWindow._apply_preferences`, which re-applies
-the toolbar style and re-styles every editor tab), and on Cancel restores the
-snapshot and re-applies. Adding a new preference means: add the key+bounds in
-`settings.py`, a control in the relevant tab here, and an apply step in
-`_apply_preferences`.
+settings keys, with Fonts, Interface, and Genres tabs. It snapshots the
+originals on open (including `genre_icons`), live-applies on every change via
+the `on_apply` callback (`EquipWindow._apply_preferences`, which re-applies the
+toolbar style, re-styles every editor tab, and invalidates the icon caches),
+and on Cancel restores the snapshot and re-applies. The Genres tab lets the
+user pick a genre, set/clear a custom icon image (a `Gtk.FileChooserDialog`),
+see the overview line ("The current genre have custom icons set: …" or "No
+custom icons set."), and reset all custom icons (confirmed first). Adding a new
+preference means: add the key+bounds in `settings.py`, a control in the
+relevant tab here, an entry in the dialog's `_original` snapshot, and an apply
+step in `_apply_preferences`.
 
 ## Editing / saving flow
 
@@ -199,17 +259,20 @@ snapshot and re-applies. Adding a new preference means: add the key+bounds in
 ## YAML and the no-PyYAML fallback
 
 `asset.py` prefers PyYAML but falls back to `_fallback_dump`/`_fallback_load`,
-which handle exactly the subset this app writes: scalar top-level keys, a
-multiline `location_notes` block (`|`), and a one-level `info` mapping. If you
-extend the schema (e.g. nested structures under `info`), **either** require
-PyYAML **or** extend both fallback functions and add a round-trip test.
+which handle exactly the subset this app writes: scalar top-level keys (which
+now include `genre`), a multiline `location_notes` block (`|`), and a one-level
+`info` mapping. If you extend the schema (e.g. nested structures under `info`),
+**either** require PyYAML **or** extend both fallback functions and add a
+round-trip test.
 
 ## Settings
 
 `settings.py` persists to `$XDG_CONFIG_HOME/qdvc-equip/config.yml`. Keys:
 `open_workspaces`, `recent_workspaces`, `show_toolbar`, `show_statusbar`,
-`read_only`. Saving silently no-ops without PyYAML. On launch with no argv the
-window reopens `open_workspaces`.
+`read_only`, `code_font`, `editor_line_spacing`, `toolbar_style`, and
+`genre_icons` (a `genre -> custom icon path` map; see the Genre icons section).
+Saving silently no-ops without PyYAML. On launch with no argv the window
+reopens `open_workspaces`.
 
 ## Testing
 
