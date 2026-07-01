@@ -41,12 +41,12 @@ class ToolbarMixin:
         btn_new_tab.connect("clicked", self.on_new_tab)
         toolbar.insert(btn_new_tab, -1)
 
-        btn_new_asset = Gtk.ToolButton(icon_name="document-new")
-        btn_new_asset.set_label("New asset")
-        btn_new_asset.set_tooltip_text("Create a new asset")
-        btn_new_asset.set_is_important(True)
-        btn_new_asset.connect("clicked", self.on_new_asset)
-        toolbar.insert(btn_new_asset, -1)
+        self.btn_new_asset = Gtk.ToolButton(icon_name="document-new")
+        self.btn_new_asset.set_label("New asset")
+        self.btn_new_asset.set_tooltip_text("Create a new asset")
+        self.btn_new_asset.set_is_important(True)
+        self.btn_new_asset.connect("clicked", self.on_new_asset)
+        toolbar.insert(self.btn_new_asset, -1)
 
         self.btn_save = Gtk.ToolButton(icon_name="document-save")
         self.btn_save.set_label("Save asset")

@@ -81,7 +81,11 @@ class TabsMixin:
         if tab.preview and tab.asset is not None:
             tab.scroller.hide()
             self._sync_asset_from_buffer(tab)
-            preview = build_preview(tab.asset, tab.workspace_disp)
+            icon_pixbuf = self._asset_heading_pixbuf(tab.asset)
+            preview = build_preview(
+                tab.asset, tab.workspace_disp,
+                icon_pixbuf=icon_pixbuf,
+                on_navigate=lambda t=tab: self._navigate_to_asset(t))
             tab.container.pack_start(preview, True, True, 0)
             preview.show_all()
         else:

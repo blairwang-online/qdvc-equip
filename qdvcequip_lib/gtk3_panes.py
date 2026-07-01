@@ -156,10 +156,10 @@ class PanesMixin:
         cell.set_property("pixbuf", None)
         cell.set_property("icon-name", {
             KIND_ALL: "emblem-documents",
-            KIND_TAGS_ROOT: "emblem-symbolic-link",
+            KIND_TAGS_ROOT: "application-x-addon",
             KIND_TAGGED: "emblem-default",
             KIND_UNTAGGED: "important",
-            KIND_GENRE_ROOT: "emblem-photos",
+            KIND_GENRE_ROOT: "preferences-desktop-theme",
             KIND_WORKSPACES_ROOT: "emblem-generic",
             KIND_WORKSPACE: "applications-other",
         }.get(kind, "folder"))
@@ -188,6 +188,26 @@ class PanesMixin:
             # Last-ditch fallback: let the renderer resolve the name itself.
             cell.set_property("pixbuf", None)
             cell.set_property("icon-name", name)
+
+    def _asset_heading_pixbuf(self, asset, size=48):
+        """Return the *size*-px genre icon pixbuf for *asset*'s Preview heading.
+
+        Mirrors the pane-2 item icon: the asset's genre icon (custom image if
+        set, else the built-in one) or the generic package icon when the asset
+        has no genre or an unknown one. Returns None only if even the fallback
+        can't be loaded.
+        """
+        g = getattr(asset, "genre", "") or ""
+        if g and genre_mod.is_genre(g):
+            custom = self.settings.genre_icon(g)
+            if custom:
+                pb = self._custom_icon_pixbuf(custom, size)
+                if pb is not None:
+                    return pb
+            name = genre_mod.icon_name(g) or "package-x-generic"
+        else:
+            name = "package-x-generic"
+        return self._themed_icon_pixbuf(name, size)
 
     def _themed_icon_pixbuf(self, name, size):
         """Load a named theme icon into a pixbuf at *size* px, cached by

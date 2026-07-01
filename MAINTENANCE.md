@@ -78,26 +78,31 @@ qdvcequip_lib/
                            (left list from property_catalog.missing_specs) and
                            enter its value (right: description + genre dropdown /
                            date picker / text). run_modal() returns (spec,value).
-  gtk3_preview.py  (view)  Builds the read-only Preview card: optional Genre
-                           section (verbatim), humanized value-aligned
-                           asset-information rows (Gtk.Grid + SizeGroup) with
-                           per-row [copy] buttons, and the `purchased` date+age
-                           special-case.
+  gtk3_preview.py  (view)  Builds the read-only Preview card: heading with the
+                           48px genre icon (caller-supplied) + name, optional
+                           Genre section (verbatim), a Location title with a
+                           "navigate" button (folder-open), humanized
+                           value-aligned asset-information rows (Gtk.Grid +
+                           SizeGroup) with per-row copy buttons (edit-copy), and
+                           the `purchased` date+age special-case.
   gtk3_panes.py    (view)  PanesMixin: _build_ui + the three panes + status bar,
                            and the pane-1/pane-2 cell rendering (nav icons + the
                            right-aligned count column, the shared genre-icon
-                           logic sized 16/24 px + pixbuf caches, item icons,
-                           card-view markup, full-contents search filter).
+                           logic sized 16/24/48 px + pixbuf caches, item icons,
+                           card-view markup, full-contents search filter,
+                           _asset_heading_pixbuf for the preview heading).
   gtk3_tabs.py     (view)  TabsMixin: the pane-3 notebook — tab lifecycle,
-                           editor/preview rendering, per-tab editor styling, and
+                           editor/preview rendering (passes the heading icon +
+                           navigate callback), per-tab editor styling, and
                            tab-switch → toggle sync.
   gtk3_actions.py  (view)  ActionsMixin: workspace open/close/refresh + nav-row
                            building (with per-row counts), item-list filling
                            (folder / All Assets / tag+genre filters) labelled by
-                           asset name, selection/search/Alt+N nav, every
-                           menu+toolbar action handler (incl. Add property), the
-                           card-view/read-only/preview toggles, and helpers
-                           (prompt, recent menu, nav counts, status, on_destroy).
+                           asset name, selection/search/Alt+N nav, navigate-to-
+                           asset, every menu+toolbar handler (incl. Add
+                           property), the view toggles, action-sensitivity
+                           gating, and helpers (prompt, recent menu, nav counts,
+                           status, on_destroy).
   gtk3_window.py   (view)  EquipWindow: a thin composition of the mixins above
                            plus __init__ (window setup + session bootstrap). Re-
                            exports the gtk3_common constants for compatibility.
@@ -230,14 +235,25 @@ when the row would list nothing) shown in a second, right-aligned
 
 Selecting a group *parent* (`KIND_TAGS_ROOT` / `KIND_GENRE_ROOT` /
 `KIND_WORKSPACES_ROOT`) lists nothing — it just expands and prompts. Row icons
-come from `_nav_icon_func`: workspace = `applications-other`, Workspaces parent
-= `emblem-generic`, Tagged = `emblem-default`, Not Tagged = `important`, and a
-`KIND_GENRE` row shows its genre icon (custom or built-in) via
-`_apply_genre_icon`. There is no mapping between folder depth and real-world
+come from `_nav_icon_func`: Asset Tags parent = `application-x-addon`, Genres
+parent = `preferences-desktop-theme`, workspace = `applications-other`,
+Workspaces parent = `emblem-generic`, Tagged = `emblem-default`, Not Tagged =
+`important`, and a `KIND_GENRE` row shows its genre icon (custom or built-in)
+via `_apply_genre_icon`. There is no mapping between folder depth and real-world
 ontology — the tree just mirrors the filesystem.
 
 Note the two "new" actions (`on_new_asset`, `on_new_folder`) require a real
 folder path, so they proceed only for `KIND_WORKSPACE`/`KIND_FOLDER` rows.
+
+**Action sensitivity.** `_update_action_sensitivity` (called at the end of
+`update_status`, which every state change funnels through) enables *New asset*
+only when a `KIND_WORKSPACE`/`KIND_FOLDER` row is selected, and *Save asset*
+only when the active tab holds an asset with `dirty` (unsaved) changes. It sets
+both the toolbar buttons (`btn_new_asset`, `btn_save`) and the menu items
+(`mi_new_asset`, `mi_save`); disabling an accelerator-bearing menu item also
+disables its keyboard shortcut. After a successful save, `on_save_asset` calls
+`_refresh_item_list` (re-runs the current nav selection) so pane 2 reflects any
+name/genre/tag change.
 
 **Counts.** Workspace/folder rows get their count (direct `asset_files`, what a
 click lists) when the row is built. The aggregate filter rows (All Assets,
@@ -272,7 +288,8 @@ GTK's icon theme wants. A user override lives in `settings.genre_icons`
 size)` renders the icon to a pixbuf at *size* px — the override via
 `_custom_icon_pixbuf` (cached by path+size, revalidated on mtime) or the stock
 named icon via `_themed_icon_pixbuf` (cached by name+size). This lets the nav
-tree ask for 16 px while card view asks for 24 px. It drives both the pane-1
+tree ask for 16 px while card view asks for 24 px (and the Preview heading for
+48 px via `_asset_heading_pixbuf`). It drives both the pane-1
 genre rows and the pane-2 item icons (`_item_icon_data`). After Preferences
 changes an icon, `_apply_preferences` calls `_invalidate_icon_caches` to drop
 the custom-icon pixbuf cache and redraw both views (the themed-icon cache is not
@@ -289,17 +306,29 @@ lists `(workspace root)` plus a humanized breadcrumb for every folder via
 `_all_folder_destinations`, greys out the current folder, confirms, then
 `os.rename`s the file and updates any open tab pointing at it.
 
-## Preview alignment
+## Preview
 
-`gtk3_preview.build_preview` lays asset-information rows in a 3-column
-`Gtk.Grid` (label, value, copy button). A horizontal `Gtk.SizeGroup` over the
-label cells forces them all to the width of the widest label, so the value
-column aligns — the GNOME/MATE convention. Labels are humanized from the
-snake_case keys here in the builder (iterating `asset.info` directly so the raw
-key is retained); the snake_case keys never appear in the UI. Two special
-cases: an optional **Genre** section is rendered above Location (verbatim,
-never humanized), and the `purchased` row shows `dates.format_purchased(value)`
-(friendly date + age) while its [copy] button still copies the raw ISO value.
+`gtk3_preview.build_preview(asset, workspace_display_name, icon_pixbuf,
+on_navigate)` lays asset-information rows in a 3-column `Gtk.Grid` (label,
+value, copy button). A horizontal `Gtk.SizeGroup` over the label cells forces
+them all to the width of the widest label, so the value column aligns — the
+GNOME/MATE convention. Labels are humanized from the snake_case keys here in
+the builder (iterating `asset.info` directly so the raw key is retained); the
+snake_case keys never appear in the UI. Notable behaviours:
+
+- **Heading** = a 48px genre icon + the asset name. The emoji is *not* shown
+  anymore. The pixbuf is resolved by the window (`_asset_heading_pixbuf`, same
+  custom/themed/fallback logic as the pane-2 item icons) and passed in as
+  `icon_pixbuf`, keeping the preview a pure view.
+- **Genre** section (verbatim, never humanized) is rendered above Location when
+  set.
+- **Location** title carries a **navigate** button (icon `folder-open`) when
+  `on_navigate` is supplied; the window wires it to `_navigate_to_asset(tab)`,
+  which selects the asset's folder row in pane 1 (filling pane 2) and then
+  selects the asset row in pane 2 (`_find_nav_folder_iter` / `_find_item_iter`).
+- Each info row's **copy** button uses the `edit-copy` icon; the `purchased`
+  row shows `dates.format_purchased(value)` (friendly date + age) while copy
+  still copies the raw ISO value.
 
 ## Card view (items pane)
 

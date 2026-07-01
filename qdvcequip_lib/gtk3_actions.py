@@ -320,6 +320,66 @@ class ActionsMixin:
             return
         self.new_tab(asset=asset, workspace_disp=ws.display_name)
 
+    def _navigate_to_asset(self, tab):
+        """Reveal the tab's asset: select its folder in pane 1 (which fills
+        pane 2) and then select the asset row in pane 2.
+
+        Invoked by the Preview "navigate" button.
+        """
+        asset = getattr(tab, "asset", None)
+        if asset is None or not asset.path:
+            return
+        ws_root = asset.workspace_root
+        folder = os.path.dirname(asset.path)
+        nav_it = self._find_nav_folder_iter(folder, ws_root)
+        if nav_it is None:
+            self.set_status("Could not locate this asset in the tree.")
+            return
+        # Expand ancestors and select the folder/workspace row; the selection
+        # handler fills pane 2 for that node.
+        path = self.nav_store.get_path(nav_it)
+        self.nav_view.expand_to_path(path)
+        self.nav_view.get_selection().select_iter(nav_it)
+        self.nav_view.scroll_to_cell(path, None, False, 0, 0)
+        # Now select the asset in pane 2.
+        item_it = self._find_item_iter(asset.path)
+        if item_it is not None:
+            self.item_view.get_selection().select_iter(item_it)
+            self.item_view.scroll_to_cell(
+                self.item_filter.get_path(item_it), None, False, 0, 0)
+        self.set_status("Located %s" % (asset.name or asset.stem))
+
+    def _find_nav_folder_iter(self, folder, ws_root):
+        """Return the nav iter for the KIND_FOLDER/KIND_WORKSPACE row whose path
+        matches *folder* within workspace *ws_root*, or None."""
+        target = os.path.abspath(folder)
+
+        def walk(it):
+            while it is not None:
+                kind = self.nav_store[it][NAV_KIND]
+                if kind in (KIND_FOLDER, KIND_WORKSPACE) \
+                        and self.nav_store[it][NAV_WS_ROOT] == ws_root \
+                        and os.path.abspath(self.nav_store[it][NAV_PATH]) == target:
+                    return it
+                found = walk(self.nav_store.iter_children(it))
+                if found is not None:
+                    return found
+                it = self.nav_store.iter_next(it)
+            return None
+
+        return walk(self.nav_store.get_iter_first())
+
+    def _find_item_iter(self, asset_path):
+        """Return the item-filter iter for the row whose ITEM_PATH matches
+        *asset_path* (respecting the active search filter), or None."""
+        target = os.path.abspath(asset_path)
+        it = self.item_filter.get_iter_first()
+        while it is not None:
+            if os.path.abspath(self.item_filter[it][ITEM_PATH]) == target:
+                return it
+            it = self.item_filter.iter_next(it)
+        return None
+
     # ====================================================================
     # Action handlers
     # ====================================================================
@@ -378,9 +438,21 @@ class ActionsMixin:
             return
         tab.dirty = False
         tab.refresh_title()
-        # A save can change the asset's genre/tag, so keep the nav counts fresh.
+        # A save can change the asset's genre/tag/name, so keep the nav counts
+        # fresh and re-fill pane 2 for the current nav selection.
         self._update_nav_counts()
+        self._refresh_item_list()
         self.set_status("Saved %s" % os.path.basename(tab.asset.path))
+
+    def _refresh_item_list(self):
+        """Re-fill pane 2 for whatever is currently selected in the nav tree.
+
+        Re-runs the nav selection handler so label/genre/tag changes from a
+        save (or similar) are reflected without the user reselecting.
+        """
+        sel = self.nav_view.get_selection()
+        if sel is not None:
+            self.on_nav_selected(sel)
 
     def on_add_property(self, *_):
         tab = self._current_tab()
@@ -629,6 +701,37 @@ class ActionsMixin:
             msg += "    \u2014    Tab %d of %d" % (idx, len(self.tabs))
         self.statusbar.pop(self._status_ctx)
         self.statusbar.push(self._status_ctx, msg)
+        self._update_action_sensitivity()
+
+    def _update_action_sensitivity(self):
+        """Enable/disable the New asset and Save asset actions to match state.
+
+        New asset is available only when a workspace or folder row is selected
+        in the nav tree (the only places an asset can be created). Save asset is
+        available only when the active tab holds an asset with unsaved (dirty)
+        changes. Both the toolbar buttons and the (accelerator-bearing) menu
+        items are updated, so the keyboard shortcuts follow suit.
+        """
+        # New asset — depends on the current nav selection.
+        can_new = False
+        sel = self.nav_view.get_selection() if hasattr(self, "nav_view") else None
+        if sel is not None:
+            model, it = sel.get_selected()
+            if it is not None and model[it][NAV_KIND] in (
+                    KIND_WORKSPACE, KIND_FOLDER):
+                can_new = True
+        # Save asset — depends on the active tab having dirty asset content.
+        tab = self._current_tab()
+        can_save = bool(tab is not None and tab.asset is not None and tab.dirty)
+
+        for w in (getattr(self, "btn_new_asset", None),
+                  getattr(self, "mi_new_asset", None)):
+            if w is not None:
+                w.set_sensitive(can_new)
+        for w in (getattr(self, "btn_save", None),
+                  getattr(self, "mi_save", None)):
+            if w is not None:
+                w.set_sensitive(can_save)
 
     def on_destroy(self, *_):
         self.settings.save()

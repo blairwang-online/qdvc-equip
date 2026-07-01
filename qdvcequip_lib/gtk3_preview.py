@@ -5,10 +5,10 @@ read-only card built from real GTK widgets (labels, sections, and per-row
 ``[copy]`` buttons). This is QDVC Equip's analogue of the notebook's markdown
 preview, but instead of rich text it produces a structured equipment card:
 
-    ☕ Coffee Machine             <- large heading (emoji + name)
+    [48px genre icon]  Coffee Machine   <- heading: genre icon + name
     Genre                        <- only shown when a genre is set
         appliances               (verbatim — never humanized)
-    Location
+    Location            [navigate]
         Home --> Kitchen --> Pantry
     Location Notes               <- only shown when notes are present
         ...wrapped notes...
@@ -18,14 +18,20 @@ preview, but instead of rich text it produces a structured equipment card:
         Model:         Cino Grande XL Gen. 2   [copy]
         Serial Number: 689D857D6               [copy]
 
+The heading shows the 48x48 icon for the asset's genre (or the generic package
+icon when it has none), resolved by the caller and passed in as *icon_pixbuf* —
+the emoji is no longer rendered. Next to the Location title a "navigate" button
+(when *on_navigate* is supplied) reveals the asset in the nav tree / item list.
+
 Asset-information labels are humanized from their snake_case YAML keys. Their
 *values* are column-aligned with one another, following the GNOME2/MATE/GTK
 convention — achieved with a Gtk.Grid (label in column 0, value in column 1,
 copy button in column 2) plus a SizeGroup so the label column is exactly as
-wide as its widest label. Each [copy] button puts that row's value on the
-clipboard. The ``purchased`` row is special-cased: its ISO date is shown as a
-friendly date plus the asset's age (e.g. ``Wed 01 Jul 2026 (52d)``) while the
-copy button still copies the raw value (see ``qdvcequip_lib.dates``).
+wide as its widest label. Each [copy] button (icon ``edit-copy``) puts that
+row's value on the clipboard. The ``purchased`` row is special-cased: its ISO
+date is shown as a friendly date plus the asset's age (e.g. ``Wed 01 Jul 2026
+(52d)``) while the copy button still copies the raw value (see
+``qdvcequip_lib.dates``).
 """
 
 import gi
@@ -42,24 +48,36 @@ from . import genre as genre_mod
 _BODY_INDENT = 24
 
 
-def build_preview(asset, workspace_display_name=""):
-    """Return a Gtk.Widget rendering *asset* as a read-only card."""
+def build_preview(asset, workspace_display_name="", icon_pixbuf=None,
+                  on_navigate=None):
+    """Return a Gtk.Widget rendering *asset* as a read-only card.
+
+    *icon_pixbuf* is the 48x48 genre icon shown in the heading (the caller
+    resolves it; None falls back to no image). *on_navigate*, if given, is a
+    zero-argument callback wired to a "navigate" button beside the Location
+    title that reveals the asset in the nav tree / item list.
+    """
     outer = Gtk.ScrolledWindow()
     outer.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
 
     box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
     box.set_border_width(16)
 
-    # --- heading: emoji + name in large text ------------------------------
+    # --- heading: 48x48 genre icon + name in large text -------------------
     heading_text = asset.name or asset.stem or "Untitled asset"
-    if asset.emoji:
-        heading_text = "%s  %s" % (asset.emoji, heading_text)
+    heading_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+    if icon_pixbuf is not None:
+        img = Gtk.Image.new_from_pixbuf(icon_pixbuf)
+        img.set_valign(Gtk.Align.CENTER)
+        heading_row.pack_start(img, False, False, 0)
     heading = Gtk.Label(xalign=0.0)
     heading.set_markup(
         '<span size="xx-large" weight="bold">%s</span>'
         % _escape(heading_text))
     heading.set_line_wrap(True)
-    box.pack_start(heading, False, False, 0)
+    heading.set_valign(Gtk.Align.CENTER)
+    heading_row.pack_start(heading, False, False, 0)
+    box.pack_start(heading_row, False, False, 0)
 
     # --- Genre (optional; shown verbatim, never humanized) ----------------
     if asset.genre:
@@ -72,7 +90,7 @@ def build_preview(asset, workspace_display_name=""):
         crumbs.append(workspace_display_name)
     crumbs.extend(asset.location_parts())
     if crumbs:
-        _add_section_title(box, "Location")
+        _add_location_title(box, "Location", on_navigate)
         breadcrumb = "  \u2192  ".join(crumbs)
         _add_indented_line(box, breadcrumb)
 
@@ -119,7 +137,11 @@ def build_preview(asset, workspace_display_name=""):
             val.set_hexpand(True)
             grid.attach(val, 1, r, 1, 1)
 
-            copy_btn = Gtk.Button(label="copy")
+            copy_btn = Gtk.Button()
+            copy_btn.set_image(Gtk.Image.new_from_icon_name(
+                "edit-copy", Gtk.IconSize.BUTTON))
+            copy_btn.set_label("copy")
+            copy_btn.set_always_show_image(True)
             copy_btn.set_tooltip_text(
                 "Copy \u201c%s\u201d to clipboard" % copy_value)
             copy_btn.set_valign(Gtk.Align.CENTER)
@@ -147,6 +169,29 @@ def _add_section_title(box, title):
     lbl.set_markup("<b>%s</b>" % _escape(title))
     lbl.set_margin_top(10)
     box.pack_start(lbl, False, False, 0)
+
+
+def _add_location_title(box, title, on_navigate):
+    """Section title with an optional "navigate" button to its right."""
+    if on_navigate is None:
+        _add_section_title(box, title)
+        return
+    row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+    row.set_margin_top(10)
+    lbl = Gtk.Label(xalign=0.0)
+    lbl.set_markup("<b>%s</b>" % _escape(title))
+    lbl.set_valign(Gtk.Align.CENTER)
+    row.pack_start(lbl, False, False, 0)
+    btn = Gtk.Button()
+    btn.set_image(Gtk.Image.new_from_icon_name(
+        "folder-open", Gtk.IconSize.BUTTON))
+    btn.set_label("navigate")
+    btn.set_always_show_image(True)
+    btn.set_tooltip_text("Reveal this asset in the navigation tree")
+    btn.set_valign(Gtk.Align.CENTER)
+    btn.connect("clicked", lambda _b: on_navigate())
+    row.pack_start(btn, False, False, 0)
+    box.pack_start(row, False, False, 0)
 
 
 def _add_indented_line(box, text, wrap=False):

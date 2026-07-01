@@ -70,6 +70,18 @@ choose one, fill in the field it offers (a dropdown for `genre`, a date picker
 for `purchased`, a text box otherwise), and Save to insert it into the asset's
 YAML for review.
 
+**New asset** is available only when a workspace or one of its folders is
+selected in the tree (the places an asset can actually live). **Save asset** is
+available only when the tab in front holds an asset with unsaved changes; after
+a save, Pane 2 refreshes so any change to the asset's name, genre, or tag shows
+immediately.
+
+In the Preview pane the heading shows the 48×48 icon for the asset's genre (or
+the generic package icon if it has none), a **navigate** button beside
+*Location* reveals the asset in the tree and selects it in Pane 2, and each
+asset-information row has a **copy** button that puts its value on the
+clipboard.
+
 ## Usage
 
 ```bash

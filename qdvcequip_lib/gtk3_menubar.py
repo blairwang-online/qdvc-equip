@@ -36,19 +36,19 @@ class MenuBarMixin:
         file_item = Gtk.MenuItem.new_with_mnemonic("_File")
         file_item.set_submenu(file_menu)
 
-        mi_new_asset = self._icon_menu_item("New asset", "document-new")
-        mi_new_asset.add_accelerator("activate", accel, Gdk.KEY_n,
+        self.mi_new_asset = self._icon_menu_item("New asset", "document-new")
+        self.mi_new_asset.add_accelerator("activate", accel, Gdk.KEY_n,
+                                          Gdk.ModifierType.CONTROL_MASK,
+                                          Gtk.AccelFlags.VISIBLE)
+        self.mi_new_asset.connect("activate", self.on_new_asset)
+        file_menu.append(self.mi_new_asset)
+
+        self.mi_save = self._icon_menu_item("Save asset", "document-save")
+        self.mi_save.add_accelerator("activate", accel, Gdk.KEY_s,
                                      Gdk.ModifierType.CONTROL_MASK,
                                      Gtk.AccelFlags.VISIBLE)
-        mi_new_asset.connect("activate", self.on_new_asset)
-        file_menu.append(mi_new_asset)
-
-        mi_save = self._icon_menu_item("Save asset", "document-save")
-        mi_save.add_accelerator("activate", accel, Gdk.KEY_s,
-                                Gdk.ModifierType.CONTROL_MASK,
-                                Gtk.AccelFlags.VISIBLE)
-        mi_save.connect("activate", self.on_save_asset)
-        file_menu.append(mi_save)
+        self.mi_save.connect("activate", self.on_save_asset)
+        file_menu.append(self.mi_save)
 
         file_menu.append(Gtk.SeparatorMenuItem())
 
