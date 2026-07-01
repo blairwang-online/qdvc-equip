@@ -47,6 +47,11 @@ qdvcequip_lib/
                            Also defines the Preferences-backed keys (code_font,
                            editor_line_spacing, toolbar_style) with bounds, and
                            the genre_icons map (genre -> custom icon path).
+  gtk3_common.py   (view*) Shared TreeStore/ListStore column indices, nav
+                           node-kind tags, the NO_GENRE_SENTINEL, and stateless
+                           helpers (xml_escape, parse_font). Imported by the
+                           window mixins; avoids a circular import. (*No GTK,
+                           but grouped with the view since it serves it.)
   gtk3_menubar.py  (view)  MenuBarMixin: File/Edit/View/Help menus (icons on
                            items). New tab sits just before Close tab. Exposes
                            _icon_menu_item, reused by the context menus.
@@ -69,17 +74,45 @@ qdvcequip_lib/
                            asset-information rows (Gtk.Grid + SizeGroup) with
                            per-row [copy] buttons, and the `purchased` date+age
                            special-case.
-  gtk3_window.py   (view)  EquipWindow: layout, the three panes, the details
-                           notebook, the status bar, and action handlers.
-                           Composes the four mixins above.
+  gtk3_panes.py    (view)  PanesMixin: _build_ui + the three panes + status bar,
+                           and the pane-1/pane-2 cell rendering (nav icons, the
+                           shared genre-icon logic + pixbuf cache, item icons,
+                           card-view markup, full-contents search filter).
+  gtk3_tabs.py     (view)  TabsMixin: the pane-3 notebook — tab lifecycle,
+                           editor/preview rendering, per-tab editor styling, and
+                           tab-switch → toggle sync.
+  gtk3_actions.py  (view)  ActionsMixin: workspace open/close/refresh + nav-row
+                           building, item-list filling (folder / All Assets /
+                           tag+genre filters), selection/search/Alt+N nav, every
+                           menu+toolbar action handler, the card-view/read-only/
+                           preview toggles, and helpers (prompt, recent menu,
+                           status bar, on_destroy).
+  gtk3_window.py   (view)  EquipWindow: a thin composition of the mixins above
+                           plus __init__ (window setup + session bootstrap). Re-
+                           exports the gtk3_common constants for compatibility.
 ```
 
 ## Mixin composition
 
-`EquipWindow(MenuBarMixin, ToolbarMixin, ContextMenuMixin, Gtk.Window)`. The
-mixins hold construction/handler groups and rely on attributes defined on the
-window; each AssetTab is its own object (not a mixin) created via `new_tab`.
-This keeps `gtk3_window.py` focused and mirrors qdvc-markdown-notebook's split.
+```
+EquipWindow(MenuBarMixin, ToolbarMixin, ContextMenuMixin,
+            PanesMixin, TabsMixin, ActionsMixin, Gtk.Window)
+```
+
+The mixins hold construction/handler groups and rely on attributes defined
+across each other and on the window; each AssetTab is its own object (not a
+mixin) created via `new_tab`. `gtk3_window.py` itself is intentionally tiny —
+just the class declaration and `__init__` (window setup + session bootstrap).
+This keeps each file focused and mirrors qdvc-markdown-notebook's split
+(`gtk3_panes` / `gtk3_actions` / …).
+
+Because the mixins share TreeStore/ListStore column indices and node-kind
+constants, those live in `gtk3_common` (not in `gtk3_window`) so any mixin can
+import them without a cycle; `gtk3_window` re-exports them so older imports like
+`from qdvcequip_lib.gtk3_window import KIND_TAGGED` still resolve. When you add
+a method, drop it in the mixin that owns that concern (panes = construction +
+cell rendering; tabs = the notebook; actions = handlers + item filling), not in
+`gtk3_window`.
 
 ## Launch behavior & tab shortcuts
 
@@ -121,10 +154,11 @@ previewing, driven by `AssetTab.refresh_status_icons()` (the icons use
   the workspace root into humanized breadcrumb segments; the workspace name is
   prepended by the preview builder.
 
-## The three panes (gtk3_window.py)
+## The three panes (gtk3_panes.py)
 
-Built from two nested `Gtk.Paned`. Column index constants live at module top:
-`NAV_*` for the navigation `TreeStore`, `ITEM_*` for the item `ListStore`.
+Built from two nested `Gtk.Paned`. Column-index constants (`NAV_*` for the
+navigation `TreeStore`, `ITEM_*` for the item `ListStore`) live in
+`gtk3_common`.
 
 1. **Navigation tree** — `self.nav_view` / `self.nav_store`. Fixed grouping
    rows (All Assets, Asset Tags, Genres, Workspaces) plus workspaces nested
