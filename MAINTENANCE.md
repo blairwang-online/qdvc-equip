@@ -40,6 +40,11 @@ qdvcequip_lib/
                            for GTK lookup; genres are never humanized.
   dates.py         (core)  Purchase-date parsing + friendly formatting and age
                            ("Wed 01 Jul 2026 (52d)" / "(3.7y)"). Pure/testable.
+  property_catalog.py (core) The catalog of documented asset properties for the
+                           Add-property dialog: each PropertySpec records its
+                           key, storage location (top-level attr vs info key),
+                           help text, and field kind (text / genre / date).
+                           missing_specs(asset) returns what an asset lacks.
   workspace.py     (core)  Workspace + FolderNode tree. Scans the filesystem,
                            enforces workspace-wide name uniqueness, computes
                            new asset/folder paths.
@@ -69,24 +74,30 @@ qdvcequip_lib/
   gtk3_preferences.py (view) PreferencesDialog: Edit -> Preferences (Fonts +
                            Interface + Genres) with live preview and
                            Save/Cancel-revert.
+  gtk3_addproperty.py (view) AddPropertyDialog: pick a not-yet-present property
+                           (left list from property_catalog.missing_specs) and
+                           enter its value (right: description + genre dropdown /
+                           date picker / text). run_modal() returns (spec,value).
   gtk3_preview.py  (view)  Builds the read-only Preview card: optional Genre
                            section (verbatim), humanized value-aligned
                            asset-information rows (Gtk.Grid + SizeGroup) with
                            per-row [copy] buttons, and the `purchased` date+age
                            special-case.
   gtk3_panes.py    (view)  PanesMixin: _build_ui + the three panes + status bar,
-                           and the pane-1/pane-2 cell rendering (nav icons, the
-                           shared genre-icon logic + pixbuf cache, item icons,
+                           and the pane-1/pane-2 cell rendering (nav icons + the
+                           right-aligned count column, the shared genre-icon
+                           logic sized 16/24 px + pixbuf caches, item icons,
                            card-view markup, full-contents search filter).
   gtk3_tabs.py     (view)  TabsMixin: the pane-3 notebook — tab lifecycle,
                            editor/preview rendering, per-tab editor styling, and
                            tab-switch → toggle sync.
   gtk3_actions.py  (view)  ActionsMixin: workspace open/close/refresh + nav-row
-                           building, item-list filling (folder / All Assets /
-                           tag+genre filters), selection/search/Alt+N nav, every
-                           menu+toolbar action handler, the card-view/read-only/
-                           preview toggles, and helpers (prompt, recent menu,
-                           status bar, on_destroy).
+                           building (with per-row counts), item-list filling
+                           (folder / All Assets / tag+genre filters) labelled by
+                           asset name, selection/search/Alt+N nav, every
+                           menu+toolbar action handler (incl. Add property), the
+                           card-view/read-only/preview toggles, and helpers
+                           (prompt, recent menu, nav counts, status, on_destroy).
   gtk3_window.py   (view)  EquipWindow: a thin composition of the mixins above
                            plus __init__ (window setup + session bootstrap). Re-
                            exports the gtk3_common constants for compatibility.
@@ -165,7 +176,9 @@ navigation `TreeStore`, `ITEM_*` for the item `ListStore`) live in
    under the last; selecting a node fills the item list. See the fuller
    "Navigation tree (pane 1)" section below.
 2. **Items** — `self.item_view` over a `TreeModelFilter` driven by the search
-   entry. Each row's icon (`_item_icon_data`) reflects its genre. The
+   entry. Rows are labelled by the asset's `name` (falling back to the humanized
+   filename only when a file has no name). Each row's icon (`_item_icon_data`)
+   reflects its genre, sized 24 px in card view and 16 px in the plain list. The
    `_item_visible_func` matches the query against the row's visible columns AND
    the asset's full file contents (read via `_asset_contents_lower`, cached per
    path+mtime), mirroring qdvc-markdown-notebook's name-and-contents search.
@@ -183,6 +196,9 @@ the toolbar and in the View menu. To avoid feedback loops, `_sync_toggle`
 `_syncing_view_toggles` is raised; every `on_*_toggle_*` handler returns early
 when the guard is up. Each toggle has a single `_set_*` entry point. If you add
 a third surface for these toggles, funnel it through the same `_set_*` method.
+Card view is the launch default: `__init__` calls `_set_card_view(True)` after
+`_build_ui`, which drives the toolbar button and menu item through the same
+entry point so they start in sync.
 
 **Preview disables Read-only.** `_set_preview` calls
 `btn_readonly.set_sensitive(not preview)` and the same on the menu item, because
@@ -190,9 +206,11 @@ preview is read-only by construction — matching qdvc-markdown-notebook.
 
 ## Navigation tree (pane 1)
 
-Built as a `Gtk.TreeStore` with columns `[label, kind, path, ws_root]`. The
-fixed top-level rows are laid down by `_build_static_nav_rows` (also re-run by
-`refresh_workspaces`), in order:
+Built as a `Gtk.TreeStore` with columns `[label, kind, path, ws_root, count]`.
+The `count` column is a pre-formatted right-aligned string (`"(500)"`, or `""`
+when the row would list nothing) shown in a second, right-aligned
+`TreeViewColumn`. The fixed top-level rows are laid down by
+`_build_static_nav_rows` (also re-run by `refresh_workspaces`), in order:
 
 - `KIND_ALL` — the "All Assets" virtual row. Selecting it calls
   `_fill_item_list_all` (every asset in every workspace).
@@ -221,17 +239,44 @@ ontology — the tree just mirrors the filesystem.
 Note the two "new" actions (`on_new_asset`, `on_new_folder`) require a real
 folder path, so they proceed only for `KIND_WORKSPACE`/`KIND_FOLDER` rows.
 
+**Counts.** Workspace/folder rows get their count (direct `asset_files`, what a
+click lists) when the row is built. The aggregate filter rows (All Assets,
+Tagged / Not Tagged, each genre, "(no genre)") are filled by
+`_update_nav_counts`, which scans every open asset once and writes each row's
+`NAV_COUNT` via `_set_count` (`_count_label` renders `"(N)"` or `""`). It runs
+after any change to the set of assets: `open_workspace`, `refresh_workspaces`
+(new asset/folder/close call this), and `on_save_asset` (a save can change an
+asset's genre/tag).
+
+## Add property (gtk3_addproperty.py)
+
+`on_add_property` (Edit menu + toolbar) first `_sync_asset_from_buffer`s the
+active tab (so unsaved edits aren't lost), then runs `AddPropertyDialog`, a view
+over `property_catalog`. The dialog lists `missing_specs(asset)` on the left and
+shows the selected spec's description plus a field on the right — a genre
+`ComboBoxText` (verbatim), a `Gtk.Calendar` for `purchased` (read back as
+`YYYY-MM-DD`), or a text `Entry`. On Save it returns `(spec, value)`; the
+handler calls `Asset.add_property(key, value, in_info)` (top-level attribute vs
+`asset_information` key, per `spec.location`), which sets the value and
+regenerates the cached YAML. The tab is reloaded and marked dirty so the user
+reviews and saves. Adding a property to the catalog is a one-line `PropertySpec`
+in `property_catalog._SPECS`; no view changes are needed unless it wants a new
+field kind.
+
 ## Genre icons
 
 `genre.py` is the single source of truth: `GENRE_ICONS` maps each built-in
 genre to a `category/icon-name` default; `icon_name()` returns the bare name
 GTK's icon theme wants. A user override lives in `settings.genre_icons`
-(`genre -> absolute image path`). `EquipWindow._apply_genre_icon` applies the
-override (loaded + scaled by `_custom_icon_pixbuf`, cached by path+mtime) or
-falls back to the stock named icon; it drives both the pane-1 genre rows and
-the pane-2 item icons (`_item_icon_data`). After Preferences changes an icon,
-`_apply_preferences` calls `_invalidate_icon_caches` to drop the pixbuf cache
-and redraw both views.
+(`genre -> absolute image path`). `EquipWindow._apply_genre_icon(cell, genre,
+size)` renders the icon to a pixbuf at *size* px — the override via
+`_custom_icon_pixbuf` (cached by path+size, revalidated on mtime) or the stock
+named icon via `_themed_icon_pixbuf` (cached by name+size). This lets the nav
+tree ask for 16 px while card view asks for 24 px. It drives both the pane-1
+genre rows and the pane-2 item icons (`_item_icon_data`). After Preferences
+changes an icon, `_apply_preferences` calls `_invalidate_icon_caches` to drop
+the custom-icon pixbuf cache and redraw both views (the themed-icon cache is not
+cleared — theme icons don't change).
 
 ## Context menus
 
@@ -259,13 +304,17 @@ never humanized), and the `purchased` row shows `dates.format_purchased(value)`
 ## Card view (items pane)
 
 Two cell renderers share the pane-2 column: a `Gtk.CellRendererPixbuf` driven
-by `_item_icon_data` (the genre icon, or `package-x-generic` when genreless),
-and a `Gtk.CellRendererText` with `_item_cell_data` that paints each row either
-as a plain title (list view) or, in card view, as three lines: bold name, asset
-tag, and a location-notes snippet. The extra data lives in the item `ListStore`
-columns `ITEM_TAG`, `ITEM_SNIPPET`, and `ITEM_GENRE`, filled from
-`Asset.asset_tag()` / `Asset.notes_snippet()` / `Asset.genre`. Toggling card
-view just queues a redraw; no store rebuild needed.
+by `_item_icon_data` (the genre icon, or `package-x-generic` when genreless,
+rendered to a pixbuf at 24 px in card view and 16 px otherwise), and a
+`Gtk.CellRendererText` with `_item_cell_data` that paints each row either as a
+plain title (list view) or, in card view, as three lines: bold name, asset tag,
+and a location-notes snippet. The row's `ITEM_LABEL` is the asset's `name`; the
+extra card data lives in `ITEM_TAG`, `ITEM_SNIPPET`, and `ITEM_GENRE`, filled
+from `Asset.asset_tag()` / `Asset.notes_snippet()` / `Asset.genre`. Toggling
+card view just queues a redraw (`_set_card_view` also re-resizes column 0 so the
+new icon size takes effect); no store rebuild needed. Named theme icons are
+rendered through `_themed_icon_pixbuf` (cached by name+size) so a size can be
+requested regardless of the renderer's stock-size.
 
 ## Preferences
 

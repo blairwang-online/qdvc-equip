@@ -240,6 +240,22 @@ class Asset(object):
         self.info = updated.info
         self._raw_text = text
 
+    def add_property(self, key, value, in_info):
+        """Set property *key* to *value* and regenerate the raw text.
+
+        *in_info* selects the storage location: True stores it as a key inside
+        the ``asset_information`` mapping; False stores it as the top-level
+        attribute named *key* (``genre`` / ``location_notes`` / ``emoji``).
+        After the change the cached plaintext (``raw_text``) is rebuilt from the
+        structured data so the editor buffer reflects it.
+        """
+        if in_info:
+            self.info[key] = "" if value is None else str(value)
+        else:
+            setattr(self, key, "" if value is None else str(value))
+        # Rebuild the plaintext so the editor view shows the new property.
+        self._raw_text = self.to_yaml()
+
 
 # --------------------------------------------------------------------------
 # YAML helpers with graceful no-PyYAML fallback.

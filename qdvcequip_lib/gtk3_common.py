@@ -9,8 +9,10 @@ import between the mixins and keeps a single source of truth.
 Nothing here touches GTK; it is plain module-level data and functions.
 """
 
-# Navigation tree (Gtk.TreeStore) column indices: [label, kind, path, ws_root].
-NAV_LABEL, NAV_KIND, NAV_PATH, NAV_WS_ROOT = range(4)
+# Navigation tree (Gtk.TreeStore) column indices:
+# [label, kind, path, ws_root, count]. `count` is a pre-formatted, right-
+# aligned string like "(500)" (or "" when the row has no count to show).
+NAV_LABEL, NAV_KIND, NAV_PATH, NAV_WS_ROOT, NAV_COUNT = range(5)
 
 # Navigation row kinds.
 KIND_ALL = "all_assets"

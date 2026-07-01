@@ -55,6 +55,14 @@ class ToolbarMixin:
         self.btn_save.connect("clicked", self.on_save_asset)
         toolbar.insert(self.btn_save, -1)
 
+        self.btn_add_property = Gtk.ToolButton(icon_name="list-add")
+        self.btn_add_property.set_label("Add property")
+        self.btn_add_property.set_tooltip_text(
+            "Add a known property to the current asset")
+        self.btn_add_property.set_is_important(True)
+        self.btn_add_property.connect("clicked", self.on_add_property)
+        toolbar.insert(self.btn_add_property, -1)
+
         toolbar.insert(self._toolbar_separator(), -1)
 
         # Card view toggle: pane 2 shows each asset as a small multi-line card

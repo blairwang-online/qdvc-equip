@@ -29,14 +29,25 @@ from .workspace import Workspace
 from .asset import Asset
 from . import naming
 from .gtk3_preferences import PreferencesDialog
+from .gtk3_addproperty import AddPropertyDialog
+from . import property_catalog as catalog
 from .gtk3_common import (
-    NAV_LABEL, NAV_KIND, NAV_PATH, NAV_WS_ROOT,
+    NAV_LABEL, NAV_KIND, NAV_PATH, NAV_WS_ROOT, NAV_COUNT,
     KIND_ALL, KIND_WORKSPACE, KIND_FOLDER,
     KIND_TAGS_ROOT, KIND_TAGGED, KIND_UNTAGGED,
     KIND_GENRE_ROOT, KIND_GENRE, KIND_WORKSPACES_ROOT,
     NO_GENRE_SENTINEL,
     ITEM_PATH, ITEM_WS_ROOT,
 )
+
+
+def _count_label(n):
+    """Format a nav-row count: '(N)' when positive, '' when zero.
+
+    The empty string keeps the count column blank for rows that would show no
+    assets in pane 2, per the spec.
+    """
+    return "(%d)" % n if n > 0 else ""
 
 
 class ActionsMixin:
@@ -54,6 +65,7 @@ class ActionsMixin:
         ws = Workspace(path)
         self.workspaces.append(ws)
         self._add_workspace_to_nav(ws)
+        self._update_nav_counts()
         if persist:
             self.settings.note_opened(path)
             self.settings.save()
@@ -62,9 +74,11 @@ class ActionsMixin:
         return ws
 
     def _add_workspace_to_nav(self, ws):
+        # A workspace row lists its root folder's direct assets when clicked.
         ws_iter = self.nav_store.append(
             self._workspaces_iter,
-            [ws.display_name, KIND_WORKSPACE, ws.root, ws.root])
+            [ws.display_name, KIND_WORKSPACE, ws.root, ws.root,
+             _count_label(len(ws.root_node.asset_files))])
         self._populate_folder_children(ws_iter, ws.root_node, ws.root)
         self.nav_view.expand_row(
             self.nav_store.get_path(self._workspaces_iter), False)
@@ -74,7 +88,8 @@ class ActionsMixin:
         for child in node.children:
             child_iter = self.nav_store.append(
                 parent_iter,
-                [child.display_name, KIND_FOLDER, child.path, ws_root])
+                [child.display_name, KIND_FOLDER, child.path, ws_root,
+                 _count_label(len(child.asset_files))])
             self._populate_folder_children(child_iter, child, ws_root)
 
     def _workspace_for_root(self, ws_root):
@@ -89,6 +104,59 @@ class ActionsMixin:
         for ws in self.workspaces:
             ws.refresh()
             self._add_workspace_to_nav(ws)
+        self._update_nav_counts()
+
+    def _update_nav_counts(self):
+        """Fill the count column for the fixed rows (All Assets, Tagged / Not
+        Tagged, each genre and "(no genre)") by scanning every open asset once.
+
+        Workspace/folder row counts are set when those rows are built (they
+        never change without a rebuild), so this only refreshes the aggregate
+        filter rows. A blank string is stored when a count would be 0, so the
+        column stays empty for rows that would show nothing in pane 2.
+        """
+        total = 0
+        tagged = 0
+        untagged = 0
+        genre_counts = {}
+        no_genre = 0
+        for ws in self.workspaces:
+            for asset_path in ws.all_asset_files():
+                try:
+                    a = ws.load_asset(asset_path)
+                except Exception:
+                    continue
+                total += 1
+                if a.has_tag():
+                    tagged += 1
+                else:
+                    untagged += 1
+                if a.genre:
+                    genre_counts[a.genre] = genre_counts.get(a.genre, 0) + 1
+                else:
+                    no_genre += 1
+
+        def walk(it):
+            while it is not None:
+                kind = self.nav_store[it][NAV_KIND]
+                if kind == KIND_ALL:
+                    self._set_count(it, total)
+                elif kind == KIND_TAGGED:
+                    self._set_count(it, tagged)
+                elif kind == KIND_UNTAGGED:
+                    self._set_count(it, untagged)
+                elif kind == KIND_GENRE:
+                    val = self.nav_store[it][NAV_PATH]
+                    n = no_genre if val == NO_GENRE_SENTINEL \
+                        else genre_counts.get(val, 0)
+                    self._set_count(it, n)
+                walk(self.nav_store.iter_children(it))
+                it = self.nav_store.iter_next(it)
+
+        walk(self.nav_store.get_iter_first())
+
+    def _set_count(self, it, n):
+        self.nav_store[it][NAV_COUNT] = _count_label(n)
 
     # ====================================================================
     # Selection handlers + item list filling
@@ -129,17 +197,21 @@ class ActionsMixin:
 
     def _append_item_row(self, ws, asset_path, ws_root):
         stem = os.path.splitext(os.path.basename(asset_path))[0]
+        # Label by the asset's `name` field; fall back to the humanized
+        # filename only when the file has no name (e.g. malformed/unreadable).
+        label = naming.humanize(stem)
         tag, snippet, asset_genre = "", "", ""
         try:
             a = ws.load_asset(asset_path)
+            if a.name:
+                label = a.name
             tag = a.asset_tag()
             snippet = a.notes_snippet()
             asset_genre = a.genre
         except Exception:
             pass
         self.item_store.append(
-            [naming.humanize(stem), asset_path, ws_root, tag, snippet,
-             asset_genre])
+            [label, asset_path, ws_root, tag, snippet, asset_genre])
 
     def _fill_item_list(self, folder_path, ws_root):
         self.item_store.clear()
@@ -182,8 +254,9 @@ class ActionsMixin:
                 if not predicate(a):
                     continue
                 stem = os.path.splitext(os.path.basename(asset_path))[0]
+                label = a.name or naming.humanize(stem)
                 self.item_store.append([
-                    naming.humanize(stem), asset_path, ws.root,
+                    label, asset_path, ws.root,
                     a.asset_tag(), a.notes_snippet(), a.genre])
                 total += 1
         self.set_status("%d asset%s %s"
@@ -305,7 +378,34 @@ class ActionsMixin:
             return
         tab.dirty = False
         tab.refresh_title()
+        # A save can change the asset's genre/tag, so keep the nav counts fresh.
+        self._update_nav_counts()
         self.set_status("Saved %s" % os.path.basename(tab.asset.path))
+
+    def on_add_property(self, *_):
+        tab = self._current_tab()
+        if tab is None or tab.asset is None:
+            self.set_status("Open an asset first to add a property.")
+            return
+        # Capture any unsaved edits in the buffer before mutating the asset, so
+        # the added property merges with the current text rather than a stale
+        # copy. (In preview mode the asset is already synced.)
+        if not tab.preview:
+            self._sync_asset_from_buffer(tab)
+        result = AddPropertyDialog(self, tab.asset).run_modal()
+        if result is None:
+            return
+        spec, value = result
+        in_info = (spec.location == catalog.LOC_INFO)
+        tab.asset.add_property(spec.key, value, in_info)
+        # Reload the editor buffer from the regenerated YAML and flag dirty so
+        # the user can review and save.
+        self._load_tab_content(tab)
+        tab.dirty = True
+        tab.refresh_title()
+        self.update_status()
+        self.set_status("Added property \u201c%s\u201d \u2014 review and save."
+                        % spec.label)
 
     def on_open_workspace(self, *_):
         dialog = Gtk.FileChooserDialog(

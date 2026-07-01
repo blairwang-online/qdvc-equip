@@ -107,6 +107,10 @@ class MenuBarMixin:
         mi_new_folder.connect("activate", self.on_new_folder)
         edit_menu.append(mi_new_folder)
 
+        mi_add_property = self._icon_menu_item("Add property\u2026", "list-add")
+        mi_add_property.connect("activate", self.on_add_property)
+        edit_menu.append(mi_add_property)
+
         mi_refresh = self._icon_menu_item("Refresh workspaces", "view-refresh")
         mi_refresh.add_accelerator("activate", accel, Gdk.KEY_F5, 0,
                                    Gtk.AccelFlags.VISIBLE)

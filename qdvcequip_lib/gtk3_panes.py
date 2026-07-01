@@ -28,7 +28,7 @@ from gi.repository import Gtk, Pango, GdkPixbuf  # noqa: E402
 
 from . import genre as genre_mod
 from .gtk3_common import (
-    NAV_LABEL, NAV_KIND, NAV_PATH,
+    NAV_LABEL, NAV_KIND, NAV_PATH, NAV_COUNT,
     KIND_ALL, KIND_WORKSPACE,
     KIND_TAGS_ROOT, KIND_TAGGED, KIND_UNTAGGED,
     KIND_GENRE_ROOT, KIND_GENRE, KIND_WORKSPACES_ROOT,
@@ -82,17 +82,28 @@ class PanesMixin:
         frame = Gtk.Frame()
         sw = Gtk.ScrolledWindow()
         sw.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        self.nav_store = Gtk.TreeStore(str, str, str, str)
+        self.nav_store = Gtk.TreeStore(str, str, str, str, str)
         self.nav_view = Gtk.TreeView(model=self.nav_store)
         self.nav_view.set_headers_visible(False)
         col = Gtk.TreeViewColumn("Workspaces")
+        col.set_expand(True)
         icon = Gtk.CellRendererPixbuf()
         col.pack_start(icon, False)
         col.set_cell_data_func(icon, self._nav_icon_func)
         text = Gtk.CellRendererText()
+        text.set_property("ellipsize", Pango.EllipsizeMode.END)
         col.pack_start(text, True)
         col.add_attribute(text, "text", NAV_LABEL)
         self.nav_view.append_column(col)
+        # A second, right-aligned column shows the pane-2 result count for rows
+        # where selecting them would list at least one asset (blank otherwise).
+        count_col = Gtk.TreeViewColumn("Count")
+        count_cell = Gtk.CellRendererText()
+        count_cell.set_property("xalign", 1.0)
+        count_col.pack_start(count_cell, False)
+        count_col.add_attribute(count_cell, "text", NAV_COUNT)
+        count_col.set_alignment(1.0)
+        self.nav_view.append_column(count_col)
         self.nav_view.get_selection().connect("changed", self.on_nav_selected)
         sw.add(self.nav_view)
         frame.add(sw)
@@ -108,26 +119,27 @@ class PanesMixin:
         recording iters for the group parents so workspaces can be added later.
         """
         # All Assets — the virtual "everything" node (mirrors "All Notes").
-        self.nav_store.append(None, ["All Assets", KIND_ALL, "", ""])
+        self.nav_store.append(None, ["All Assets", KIND_ALL, "", "", ""])
 
         # Asset Tags group.
         tags_iter = self.nav_store.append(
-            None, ["Asset Tags", KIND_TAGS_ROOT, "", ""])
-        self.nav_store.append(tags_iter, ["Tagged", KIND_TAGGED, "", ""])
-        self.nav_store.append(tags_iter, ["Not Tagged", KIND_UNTAGGED, "", ""])
+            None, ["Asset Tags", KIND_TAGS_ROOT, "", "", ""])
+        self.nav_store.append(tags_iter, ["Tagged", KIND_TAGGED, "", "", ""])
+        self.nav_store.append(
+            tags_iter, ["Not Tagged", KIND_UNTAGGED, "", "", ""])
 
         # Genres group — one row per built-in genre, verbatim (never humanized),
         # then a trailing "(no genre)" filter row.
         genre_iter = self.nav_store.append(
-            None, ["Genres", KIND_GENRE_ROOT, "", ""])
+            None, ["Genres", KIND_GENRE_ROOT, "", "", ""])
         for g in genre_mod.all_genres():
-            self.nav_store.append(genre_iter, [g, KIND_GENRE, g, ""])
+            self.nav_store.append(genre_iter, [g, KIND_GENRE, g, "", ""])
         self.nav_store.append(
-            genre_iter, ["(no genre)", KIND_GENRE, NO_GENRE_SENTINEL, ""])
+            genre_iter, ["(no genre)", KIND_GENRE, NO_GENRE_SENTINEL, "", ""])
 
         # Workspaces group — open workspaces are nested under this parent.
         self._workspaces_iter = self.nav_store.append(
-            None, ["Workspaces", KIND_WORKSPACES_ROOT, "", ""])
+            None, ["Workspaces", KIND_WORKSPACES_ROOT, "", "", ""])
 
     def _nav_icon_func(self, _col, cell, model, it, _data):
         kind = model[it][NAV_KIND]
@@ -152,26 +164,51 @@ class PanesMixin:
             KIND_WORKSPACE: "applications-other",
         }.get(kind, "folder"))
 
-    def _apply_genre_icon(self, cell, genre_value):
-        """Set *cell* to *genre_value*'s icon: custom image if set, else stock.
+    def _apply_genre_icon(self, cell, genre_value, size=16):
+        """Set *cell* to *genre_value*'s icon at *size* px: custom image if set,
+        else the built-in freedesktop icon.
 
-        A custom icon (an image file chosen in Preferences) is loaded and
-        scaled to a small pixbuf; the built-in freedesktop icon is applied by
-        name. Unknown genres get the generic package icon so rows never blank
-        out. Pixbufs are cached by (path, mtime).
+        Both the custom image and the themed icon are rendered to a pixbuf at
+        the requested pixel size, so the icon honours *size* regardless of the
+        cell renderer's stock-size (this is how card view gets 24 px icons while
+        the nav tree stays at 16). Unknown genres get the generic package icon
+        so rows never blank out. Pixbufs are cached by (path/name, size).
         """
         custom = self.settings.genre_icon(genre_value)
         if custom:
-            pb = self._custom_icon_pixbuf(custom)
+            pb = self._custom_icon_pixbuf(custom, size)
             if pb is not None:
                 cell.set_property("pixbuf", pb)
                 return
-        cell.set_property("pixbuf", None)
         name = genre_mod.icon_name(genre_value) or "package-x-generic"
-        cell.set_property("icon-name", name)
+        pb = self._themed_icon_pixbuf(name, size)
+        if pb is not None:
+            cell.set_property("pixbuf", pb)
+        else:
+            # Last-ditch fallback: let the renderer resolve the name itself.
+            cell.set_property("pixbuf", None)
+            cell.set_property("icon-name", name)
+
+    def _themed_icon_pixbuf(self, name, size):
+        """Load a named theme icon into a pixbuf at *size* px, cached by
+        (name, size). Returns None if the theme can't supply it."""
+        cache = getattr(self, "_themed_icon_cache", None)
+        if cache is None:
+            cache = self._themed_icon_cache = {}
+        key = (name, size)
+        if key in cache:
+            return cache[key]
+        pb = None
+        try:
+            theme = Gtk.IconTheme.get_default()
+            pb = theme.load_icon(name, size, 0)
+        except Exception:
+            pb = None
+        cache[key] = pb
+        return pb
 
     def _custom_icon_pixbuf(self, path, size=16):
-        """Return a scaled GdkPixbuf for *path*, cached by (path, mtime).
+        """Return a scaled GdkPixbuf for *path*, cached by (path, size, mtime).
 
         Returns None if the file is missing or can't be decoded, so callers
         fall back to the stock icon.
@@ -287,15 +324,21 @@ class PanesMixin:
     def _item_icon_data(self, _col, cell, store, it, _data):
         """Paint each item row's icon from its genre (custom or built-in).
 
-        A genreless asset (or one whose genre isn't a built-in) shows the
-        generic package icon, matching the previous fixed behavior.
+        Icons are 24 px in card view and 16 px in the plain list. A genreless
+        asset (or one whose genre isn't a built-in) shows the generic package
+        icon at the same size.
         """
+        size = 24 if self.card_view else 16
         g = store[it][ITEM_GENRE] or ""
         if g and genre_mod.is_genre(g):
-            self._apply_genre_icon(cell, g)
+            self._apply_genre_icon(cell, g, size)
         else:
-            cell.set_property("pixbuf", None)
-            cell.set_property("icon-name", "package-x-generic")
+            pb = self._themed_icon_pixbuf("package-x-generic", size)
+            if pb is not None:
+                cell.set_property("pixbuf", pb)
+            else:
+                cell.set_property("pixbuf", None)
+                cell.set_property("icon-name", "package-x-generic")
 
     def _item_cell_data(self, _col, cell, store, it, _data):
         title = xml_escape(store[it][ITEM_LABEL])

@@ -18,17 +18,21 @@ location_notes: "You might need to move aside the cartons of UHT milk which may 
   blocking your view of the coffee machine."
 asset_information:
   asset_tag: SDR892314T
+  retailer: Beverages 4 YOU
   manufacturer: Coffee Machines Inc.
   model: Cino Grande XL Gen. 2
   serial_number: 689D857D6
+  receipt_ref: AUx8RVRQAU
   purchased: 2026-07-01
+  price: 251.50 EUR
 ```
 
 Everything except `name` is optional. The asset's **location is not stored** in
 the file — it is derived from the folders the file is nested in. Keys under
 `asset_information` are written in `snake_case` (matching the project naming
 convention) and **humanized for display** in the Preview pane, where their
-values are column-aligned and each gets a `[copy]` button.
+values are column-aligned and each gets a `[copy]` button. In the item list
+(pane 2) each asset is labelled by its `name`.
 
 The optional top-level `genre` groups an asset under one of the built-in
 genres (see below). Unlike everything else, a genre is shown **verbatim** —
@@ -52,7 +56,19 @@ The navigation tree (pane 1) has, in order: **All Assets**; **Asset Tags**
 (expanding to *Tagged* / *Not Tagged*, filtering pane 2 by whether an
 `asset_tag` is present); **Genres** (each built-in genre plus *(no genre)*,
 filtering pane 2 to that genre); and **Workspaces**, under which every open
-workspace and its folder tree is nested.
+workspace and its folder tree is nested. Each row shows a right-aligned count
+of the assets selecting it would list, and rows that would list nothing show no
+count.
+
+## Card view and Add property
+
+Pane 2 opens in **Card view** (bold name over the asset tag and a
+location-notes snippet, with a larger genre icon); toggle it from the toolbar
+or **View → Card view**. **Add property** (toolbar, or **Edit → Add property**)
+opens a picker of the documented properties the current asset doesn't yet have;
+choose one, fill in the field it offers (a dropdown for `genre`, a date picker
+for `purchased`, a text box otherwise), and Save to insert it into the asset's
+YAML for review.
 
 ## Usage
 

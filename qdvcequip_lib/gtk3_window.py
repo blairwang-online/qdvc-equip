@@ -49,7 +49,7 @@ from .gtk3_actions import ActionsMixin
 # Re-export the shared constants so existing importers (and tests) that did
 # `from qdvcequip_lib.gtk3_window import KIND_TAGGED` keep working.
 from .gtk3_common import (  # noqa: F401
-    NAV_LABEL, NAV_KIND, NAV_PATH, NAV_WS_ROOT,
+    NAV_LABEL, NAV_KIND, NAV_PATH, NAV_WS_ROOT, NAV_COUNT,
     KIND_ALL, KIND_WORKSPACE, KIND_FOLDER,
     KIND_TAGS_ROOT, KIND_TAGGED, KIND_UNTAGGED,
     KIND_GENRE_ROOT, KIND_GENRE, KIND_WORKSPACES_ROOT,
@@ -81,6 +81,9 @@ class EquipWindow(MenuBarMixin, ToolbarMixin, ContextMenuMixin,
 
         self._build_ui()
         self._apply_view_settings()
+        # Card view is the default presentation at launch; route through the
+        # single entry point so the toolbar button and menu item stay in sync.
+        self._set_card_view(True)
 
         to_open = list(workspace_paths or [])
         if not to_open:
